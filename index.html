@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Power Monitor — Dashboard</title>
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="stylesheet" href="style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header>
+    <div class="header-left">
+      <div class="logo-mark"><img src="logo.png" alt="Logo" /></div>
+      <div>
+        <h1>Power Monitor</h1>
+        <span class="subtitle">Panel de Monitoreo en Tiempo Real</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-block">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Desconectado</span>
+      </div>
+      <div class="timestamp" id="lastUpdate">--:--:--</div>
+    </div>
+  </header>
+
+  <!-- BROKER CONFIG -->
+  <div class="config-bar">
+    <button id="connectBtn" onclick="toggleConnection()">Conectar</button>
+    <div class="latest-alert hidden" id="latestAlert">
+      <span class="latest-alert-label">Última alerta:</span>
+      <span class="latest-alert-text" id="latestAlertText">—</span>
+    </div>  
+  </div>
+
+  <!-- MAIN GRID -->
+  <main>
+
+    <!-- FILA 1: Voltaje · Corriente · FP — 3 columnas iguales -->
+    <div class="card card--voltage" id="card-v">
+      <div class="card-label">VOLTAJE</div>
+      <div class="card-value" id="val-v">---</div>
+      <div class="card-unit">V</div>
+      <div class="card-bar"><div class="bar-fill" id="bar-v" style="width:0%"></div></div>
+      <div class="card-range">0 — 250 V</div>
+    </div>
+
+    <div class="card card--current" id="card-i">
+      <div class="card-label">CORRIENTE</div>
+      <div class="card-value" id="val-i">---</div>
+      <div class="card-unit">A</div>
+      <div class="card-bar"><div class="bar-fill" id="bar-i" style="width:0%"></div></div>
+      <div class="card-range">0 — 10 A</div>
+    </div>
+
+    <div class="card card--fp" id="card-fp">
+      <div class="card-label">FACTOR DE POTENCIA</div>
+      <div class="card-value" id="val-fp">---</div>
+      <div class="card-unit">FP</div>
+      <div class="fp-arc">
+        <svg viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+          <path d="M10 65 A 55 55 0 0 1 110 65" fill="none" stroke="#1a2030" stroke-width="8" stroke-linecap="round"/>
+          <path id="fp-arc-fill" d="M10 65 A 55 55 0 0 1 110 65" fill="none" stroke="#707070" stroke-width="8"
+            stroke-dasharray="0 125.5" stroke-linecap="round"/>
+        </svg>
+        <div class="fp-label" id="fp-rating">—</div>
+      </div>
+    </div>
+
+    <!-- FILA 2: THD · Consumo kWh — 2 columnas, misma altura que fila 1 -->
+    <div class="card card--thd" id="card-thd">
+      <div class="card-label">DISTORSIÓN ARMÓNICA (THD)</div>
+      <div class="card-value" id="val-thd">---</div>
+      <div class="card-unit">%</div>
+      <div class="fp-arc">
+        <svg viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+          <path d="M10 65 A 55 55 0 0 1 110 65" fill="none" stroke="#1a2030" stroke-width="8" stroke-linecap="round"/>
+          <path id="thd-arc-fill" d="M10 65 A 55 55 0 0 1 110 65" fill="none" stroke="#707070" stroke-width="8"
+            stroke-dasharray="0 125.5" stroke-linecap="round"/>
+        </svg>
+        <div class="fp-label" id="thd-rating">—</div>
+      </div>
+    </div>
+
+    <div class="card card--kwh" id="card-kwh">
+      <div class="card-label">CONSUMO TOTAL DE ENERGÍA</div>
+      <div class="card-value" id="val-kwh">---</div>
+      <div class="card-unit">kWh</div>
+      <div class="kwh-sub">
+        <div class="kwh-item">
+          <span class="kwh-item-label">Consumo sesión</span>
+          <span class="kwh-item-val" id="kwh-session">--- kWh</span>
+        </div>
+        <div class="kwh-item">
+          <span class="kwh-item-label">Tiempo activo</span>
+          <span class="kwh-item-val" id="kwh-time">--:--:--</span>
+        </div>
+        <div class="kwh-item">
+          <span class="kwh-item-label">Periodo</span>
+          <div class="custom-select" id="energy-period-custom">
+            <button type="button" class="custom-select-trigger">
+              <span class="custom-select-label">Bimestre</span>
+              <span class="custom-select-arrow">▾</span>
+            </button>
+            <ul class="custom-select-options">
+              <li data-value="day">Día</li>
+              <li data-value="week">Semana</li>
+              <li data-value="bimester" class="selected">Bimestre</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <button class="kwh-reset-btn" onclick="resetKwh()">↺ Resetear contador</button>
+    </div>
+
+    <div class="card card--cost" id="card-cost">
+      <span class="kwh-item-label">COSTO TOTAL DE ENERGíA</span>
+
+      <div class="card-value">
+        <span id="val-cost">---</span>
+      </div>
+
+      <div class="card-unit">MXN</div>
+
+      <div class="kwh-sub">
+        <div class="kwh-item">
+          <span class="kwh-item-label">Costo sesión</span>
+          <span class="kwh-item-val" id="cost-session">--- MXN</span>
+        </div>
+
+        <div class="kwh-item">
+          <span class="kwh-item-label">Tarifa</span>
+          <div class="custom-select" id="cost-tariff-custom">
+            <button type="button" class="custom-select-trigger">
+              <span class="custom-select-label">Tarifa 1 — &lt;25°C</span>
+              <span class="custom-select-arrow">▾</span>
+            </button>
+            <ul class="custom-select-options">
+              <li data-value="1" class="selected">Tarifa 1 — &lt;25°C</li>
+              <li data-value="1A">Tarifa 1A — 25°C</li>
+              <li data-value="1B">Tarifa 1B — 28°C</li>
+              <li data-value="1C">Tarifa 1C — 30°C</li>
+              <li data-value="1D">Tarifa 1D — 31°C</li>
+              <li data-value="1E">Tarifa 1E — 32°C</li>
+              <li data-value="1F">Tarifa 1F — 33°C</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="kwh-item">
+          <span class="kwh-item-label">Bloque alcanzado</span>
+          <span class="kwh-item-val" id="cost-block">Sin consumo</span>
+        </div>
+      </div>
+
+      <div class="cost-breakdown" id="cost-breakdown">
+        <strong>Esperando conexión…</strong><br>Sin consumo registrado.
+      </div>
+
+      <div class="dac-warning hidden" id="dac-warning"></div>
+    </div>
+
+    <!-- FILA 3, columna 1: Potencias + Triángulo combinados -->
+    <div class="card card--power card--power-combined" id="card-power">
+      <div class="power-card-inner">
+
+        <div class="power-combined-grid">
+          <div class="power-combined-item">
+            <div class="card-label">POTENCIA ACTIVA</div>
+            <div class="card-value" id="val-pa">---</div>
+            <div class="card-unit">W</div>
+          </div>
+
+          <div class="power-combined-item">
+            <div class="card-label">POTENCIA APARENTE</div>
+            <div class="card-value" id="val-pap">---</div>
+            <div class="card-unit">VA</div>
+          </div>
+
+          <div class="power-combined-item">
+            <div class="card-label">POTENCIA REACTIVA</div>
+            <div class="card-value" id="val-pr">---</div>
+            <div class="card-unit">VAR</div>
+          </div>
+        </div>
+
+        <div class="triangle-wrap">
+          <div class="triangle-title">Triángulo de Potencia</div>
+          <svg id="powerTriangleSvg" viewBox="0 0 220 260" xmlns="http://www.w3.org/2000/svg">
+            <line x1="20" y1="220" x2="210" y2="220" stroke="#2a2a2a" stroke-width="1"/>
+            <line x1="20" y1="220" x2="20"  y2="20"  stroke="#2a2a2a" stroke-width="1"/>
+
+            <polygon id="triangle-shape" points="20,220 20,220 20,220" fill="rgba(255,204,0,0.12)" stroke="none"/>
+
+            <line id="triangle-p-line" x1="20" y1="220" x2="20" y2="220" stroke="#fff3b0" stroke-width="3" stroke-linecap="round"/>
+            <line id="triangle-q-line" x1="20" y1="220" x2="20" y2="220" stroke="#d9a600" stroke-width="3" stroke-linecap="round"/>
+            <line id="triangle-s-line" x1="20" y1="220" x2="20" y2="220" stroke="#ffcc00" stroke-width="3" stroke-linecap="round"/>
+
+            <text id="triangle-p-label" x="20" y="242" class="triangle-label triangle-label--p" text-anchor="middle" fill="#fff3b0" style="opacity:0">P = 0.0 W</text>
+            <text id="triangle-q-label" x="6" y="220" class="triangle-label triangle-label--q" text-anchor="middle" fill="#d9a600" style="opacity:0">Q = 0.0 VAR</text>
+            <text id="triangle-s-label" x="20" y="220" class="triangle-label triangle-label--s" text-anchor="middle" fill="#ffcc00" style="opacity:0">S = 0.0 VA</text>
+            <text id="triangle-angle-label" x="40" y="205" class="triangle-label triangle-label--angle" text-anchor="start" style="opacity:0">φ = 0.0°</text>
+          </svg>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="card card--diagnosis" id="card-diagnosis">
+      <div class="card-label">DIAGNÓSTICO DE CARGA</div>
+
+      <div class="diagnosis-value" id="diagnosis-type">Sin datos</div>
+      <div class="diagnosis-hint" id="diagnosis-hint">Esperando conexión…</div>
+
+      <div class="kwh-sub">
+        <div class="kwh-item">
+          <span class="kwh-item-label">Desfase estimado (Δt)</span>
+          <span class="kwh-item-val" id="diagnosis-dt">--- ms</span>
+        </div>
+        <div class="kwh-item">
+          <span class="kwh-item-label">Ángulo estimado (Δθ)</span>
+          <span class="kwh-item-val" id="diagnosis-angle">---°</span>
+        </div>
+        <div class="kwh-item">
+          <span class="kwh-item-label">Último análisis</span>
+          <span class="kwh-item-val" id="diagnosis-timestamp">--:--:--</span>
+        </div>
+      </div>
+
+      <button class="diag-reset-btn" onclick="resetDiagnosis()">↺ Resetear diagnóstico</button>
+    </div>
+
+    <div class="card card--efficiency" id="card-efficiency">
+      <div class="card-label">EFICIENCIA ENERGÉTICA</div>
+      <div class="card-value" id="val-efficiency">---</div>
+      <div class="card-unit">%</div>
+      <div class="fp-arc">
+        <svg viewBox="0 0 120 70" xmlns="http://www.w3.org/2000/svg">
+          <path d="M10 65 A 55 55 0 0 1 110 65" fill="none" stroke="#1a2030" stroke-width="8" stroke-linecap="round"/>
+          <path id="efficiency-arc-fill" d="M10 65 A 55 55 0 0 1 110 65" fill="none" stroke="#707070" stroke-width="8"
+            stroke-dasharray="0 125.5" stroke-linecap="round"/>
+        </svg>
+        <div class="fp-label" id="efficiency-rating">—</div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- GRÁFICA DE POTENCIA ACTIVA -->
+  <div class="chart-panel">
+    <div class="chart-header">
+      <span>▸ GRÁFICA DE POTENCIA ACTIVA</span>
+
+      <div class="chart-nav" id="powerChartNav">
+        <button class="chart-nav-btn" onclick="navigatePowerChart(-1)">◄</button>
+        <span class="chart-nav-label" id="powerChartNavLabel">—</span>
+        <button class="chart-nav-btn" id="powerChartNavNext" onclick="navigatePowerChart(1)">►</button>
+      </div>
+
+      <div class="chart-range-controls">
+        <button class="chart-range-btn active" data-range="hour" onclick="setPowerChartRange('hour')">Hora</button>
+        <button class="chart-range-btn" data-range="day" onclick="setPowerChartRange('day')">Día</button>
+        <button class="chart-range-btn" data-range="week" onclick="setPowerChartRange('week')">Semana</button>
+        <button class="chart-range-btn" data-range="bimester" onclick="setPowerChartRange('bimester')">Bimestre</button>
+      </div>
+    </div>
+
+    <div class="chart-body">
+      <canvas id="powerChart"></canvas>
+    </div>
+  </div>
+  
+  <!-- GRÁFICA DE CONSUMO DE ENERGÍA -->
+  <div class="chart-panel">
+    <div class="chart-header">
+      <span>▸ GRÁFICA DE CONSUMO DE ENERGÍA</span>
+
+      <div class="chart-nav" id="consumptionChartNav">
+        <button class="chart-nav-btn" onclick="navigateConsumptionChart(-1)">◄</button>
+        <span class="chart-nav-label" id="consumptionChartNavLabel">—</span>
+        <button class="chart-nav-btn" id="consumptionChartNavNext" onclick="navigateConsumptionChart(1)">►</button>
+      </div>
+
+      <div class="chart-range-controls">
+        <button class="chart-range-btn consumption-range-btn" data-range="day" onclick="setConsumptionChartRange('day')">Día</button>
+        <button class="chart-range-btn consumption-range-btn" data-range="week" onclick="setConsumptionChartRange('week')">Semana</button>
+        <button class="chart-range-btn consumption-range-btn" data-range="bimester" onclick="setConsumptionChartRange('bimester')">Bimestre</button>
+      </div>
+    </div>
+
+    <div class="chart-body">
+      <canvas id="consumptionChart"></canvas>
+    </div>
+  </div>
+
+  <!-- GRÁFICA DE ARMÓNICOS THD -->
+  <div class="chart-panel">
+    <div class="chart-header">
+      <span>▸ GRÁFICA DE ARMÓNICOS THD</span>
+      <div class="chart-header-actions">
+        <span class="chart-live-status" id="harmonicLastUpdate">
+          Última actualización: --:--:--
+        </span>
+        <button class="chart-range-btn" onclick="requestHarmonics()">Solicitar</button>
+      </div>
+    </div>
+
+    <div class="chart-body">
+      <canvas id="harmonicChart"></canvas>
+    </div>
+  </div>
+  
+  <!-- GRÁFICA DE FORMA DE ONDA V/I -->
+  <div class="chart-panel">
+    <div class="chart-header">
+      <span>▸ GRÁFICA DE FORMA DE ONDA</span>
+
+      <div class="chart-range-controls">
+        <span class="chart-live-status" id="waveformStatus">
+          Última actualización: --:--:--
+        </span>
+        <button class="chart-range-btn" onclick="requestWaveform()">Solicitar</button>
+      </div>
+    </div>
+
+    <div class="chart-body">
+      <canvas id="waveformChart"></canvas>
+    </div>
+  </div>
+
+  <!-- SECCIÓN DE COMANDOS -->
+  <div class="commands">
+    <div class="commands-header">▸ COMANDOS DEL DISPOSITIVO</div>
+    <div class="commands-body">
+
+      <!-- ON/OFF -->
+      <div class="cmd-block cmd-block--onoff">
+        <div class="cmd-label">ESTADO DEL CONTACTO</div>
+        <button class="onoff-btn onoff-on" id="onoffBtn" onclick="toggleRelay()">
+          <span class="onoff-icon" id="onoffIcon">●</span>
+          <span id="onoffText">ON</span>
+        </button>
+        <div class="cmd-hint" id="onoffHint">Contacto energizado</div>
+      </div>
+
+      <div class="cmd-divider"></div>
+
+      <!-- Comportamiento sin carga -->
+      <div class="cmd-block">
+        <div class="cmd-label">COMPORTAMIENTO SIN CARGA</div>
+        <div class="cmd-hint" style="margin-bottom:10px">Al desconectar la carga, mantener el sistema:</div>
+        <div style="display:flex;gap:8px;justify-content:center">
+          <button id="noLoadKeep" class="cmd-send-btn"
+                  onclick="sendNoLoadAction('KEEP')"
+                  title="Mantener la salida encendida aunque no haya corriente">
+            ✔ Conectado
+          </button>
+          <button id="noLoadOff" class="cmd-send-btn"
+                  onclick="sendNoLoadAction('OFF')"
+                  title="Desconectar la salida si no hay corriente">
+            ✕ Desconectado
+          </button>
+        </div>
+      </div>
+
+      <div class="cmd-divider"></div>
+
+      <!-- Tiempo de muestreo -->
+      <div class="cmd-block">
+        <div class="cmd-label">TIEMPO DE MUESTREO</div>
+        <div class="cmd-input-row">
+          <input type="number" id="sampleRate" min="1" max="60" value="1"
+                 oninput="updateSampleDisplay()" />
+          <span class="cmd-unit">seg</span>
+        </div>
+        <div class="cmd-slider-wrap">
+          <input type="range" id="sampleSlider" min="1" max="60" value="1"
+                 oninput="syncSampleRate(this.value)" />
+          <div class="slider-labels"><span>1 s</span><span>30 s</span><span>60 s</span></div>
+        </div>
+        <button class="cmd-send-btn" onclick="sendSampleRate()">Enviar</button>
+      </div>
+
+      <div class="cmd-divider"></div>
+
+       <!-- Límite inferior de potencia -->
+      <div class="cmd-block">
+        <div class="cmd-label">LÍMITE INFERIOR DE POTENCIA</div>
+        <div class="cmd-input-row">
+          <input type="number" id="powerLimitMin" min="0" max="1200" value="0"
+                 oninput="updatePowerLimitMinDisplay()" />
+          <span class="cmd-unit">W</span>
+        </div>
+        <div class="cmd-slider-wrap">
+          <input type="range" id="powerLimitMinSlider" min="0" max="1200" value="0"
+                 oninput="syncPowerLimitMin(this.value)" />
+          <div class="slider-labels"><span>0 W</span><span>600 W</span><span>1200 W</span></div>
+        </div>
+        <button class="cmd-send-btn" onclick="sendPowerLimitMin()">Enviar</button>
+      </div>
+
+      <div class="cmd-divider"></div>
+
+      <!-- Límite superior de potencia -->
+      <div class="cmd-block">
+        <div class="cmd-label">LÍMITE SUPERIOR DE POTENCIA</div>
+        <div class="cmd-input-row">
+          <input type="number" id="powerLimit" min="0" max="1200" value="1200"
+                 oninput="updatePowerLimitDisplay()" />
+          <span class="cmd-unit">W</span>
+        </div>
+        <div class="cmd-slider-wrap">
+          <input type="range" id="powerLimitSlider" min="0" max="1200" value="1200"
+                 oninput="syncPowerLimit(this.value)" />
+          <div class="slider-labels"><span>0 W</span><span>600 W</span><span>1200 W</span></div>
+        </div>
+        <button class="cmd-send-btn" onclick="sendPowerLimit()">Enviar</button>
+      </div>
+
+    </div>
+  </div>
+
+<!-- HISTORIAL DE ALERTAS -->
+<div class="console">
+  <div class="console-header">
+    <span>▸ HISTORIAL DE ALERTAS</span>
+    <button onclick="clearPowerAlerts()">Limpiar</button>
+  </div>
+
+  <div class="console-body" id="powerAlertsBody">
+    <div class="log-line log-info">No hay alertas registradas.</div>
+  </div>
+</div>
+
+<!-- HISTORIAL DE PERIODOS DE CONSUMO -->
+<div class="console">
+  <div class="console-header">
+    <span>▸ HISTORIAL DE PERIODOS DE CONSUMO</span>
+    <button onclick="clearConsumptionPeriods()">Limpiar</button>
+  </div>
+
+  <div class="console-body" id="consumptionPeriodsBody">
+    <div class="log-line log-info">No hay periodos registrados.</div>
+  </div>
+</div>
+
+  <!-- LOG CONSOLE -->
+  <div class="console">
+    <div class="console-header">
+      <span>▸ LOG MQTT</span>
+      <button onclick="clearLog()">Limpiar</button>
+    </div>
+    <div class="console-body" id="logBody">
+      <div class="log-line log-info">Sistema iniciado. Configure el broker y conecte.</div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
