@@ -232,6 +232,11 @@ const FAULTS = {
     bit: 17,
     label: 'Potencia elevada',
     severity: 'warn'
+  },
+  FAULT_UNDERPOWER: {
+    bit: 18,
+    label: 'Subcarga de potencia',
+    severity: 'error'
   }
 };
 
@@ -874,6 +879,10 @@ function onConnected(topic) {
 
   // Suscripción al estado físico del relé de todos los dispositivos
   client.subscribe('smartcontact/+/estado/rele');
+
+  // Suscripción al estado físico de la carga de todos los dispositivos
+  client.subscribe('smartcontact/+/estado/no_load_action');
+
   client.subscribe('smartcontact/+/telemetria/armonicos', {
     onSuccess: () => log(`✔ Suscripción a armónicos (todos los dispositivos) confirmada.`, 'success'),
     onFailure: err => log(`Error suscripción armónicos: ${err.errorMessage}`, 'error'),
@@ -1005,6 +1014,7 @@ function onMessageArrived(message) {
         if (info.severity === 'error' && (
           code === 'FAULT_OVERCURRENT' ||
           code === 'FAULT_OVERPOWER'   ||
+          code === 'FAULT_UNDERPOWER'  ||
           code === 'FAULT_RELAY_WELDED'
         )) {
           relayOn = false;
@@ -1041,7 +1051,7 @@ function onMessageArrived(message) {
   } 
   
   // ============================================================
-  // FLUJO C: Sincronización del botón físico del ESP32
+  // FLUJO C: Sincronización física del ESP32
   // ============================================================
   else if (topic.match(/^smartcontact\/.+\/estado\/rele$/)) {
     const estadoFisico = raw.trim().toUpperCase();
@@ -1086,6 +1096,18 @@ function onMessageArrived(message) {
         hint.textContent = 'Contacto apagado';
       }
     }
+  }
+
+  else if (topic.match(/^smartcontact\/.+\/estado\/no_load_action$/)) {
+    const estadoNoLoad = raw.trim().toUpperCase(); // "OFF" o "KEEP"
+
+    const offBtn  = $('noLoadOff');
+    const keepBtn = $('noLoadKeep');
+    if (offBtn && keepBtn) {
+      offBtn.classList.toggle('active', estadoNoLoad === 'OFF');
+      keepBtn.classList.toggle('active', estadoNoLoad === 'KEEP');
+    }
+    log(`Sincronización: comportamiento sin carga -> ${estadoNoLoad}`, 'success');
   }
 
   // ============================================================
@@ -2996,14 +3018,6 @@ function setSystemOnline() {
     const card = document.getElementById(id);
     if (card) card.style.removeProperty('--status-color');
   });
-
-  const savedNoLoadAction = localStorage.getItem('noLoadAction');
-  const offBtn  = $('noLoadOff');
-  const keepBtn = $('noLoadKeep');
-  if (savedNoLoadAction && offBtn && keepBtn) {
-    offBtn.classList.toggle('active', savedNoLoadAction === 'OFF');
-    keepBtn.classList.toggle('active', savedNoLoadAction === 'KEEP');
-  }
 }
 
 const rootStyles = getComputedStyle(document.documentElement);
@@ -3421,15 +3435,6 @@ window.sendNoLoadAction = function (value) {
   const label = value === 'OFF' ? 'Desconectar salida sin carga' : 'Mantener salida sin carga';
   publishToAllDevices('control/no_load_action', value);
   log(`  (${label})`, 'info');
-
-  localStorage.setItem('noLoadAction', value);
-
-  const offBtn  = $('noLoadOff');
-  const keepBtn = $('noLoadKeep');
-  if (offBtn && keepBtn) {
-    offBtn.classList.toggle('active', value === 'OFF');
-    keepBtn.classList.toggle('active', value === 'KEEP');
-  }
 };
 
 window.addEventListener('DOMContentLoaded', () => {
