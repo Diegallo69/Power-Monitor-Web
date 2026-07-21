@@ -26,13 +26,7 @@ let consumptionChart = null;
 const consumptionChartLabels = [];
 const consumptionChartData = [];
 
-let pendingConsumptionKwh = 0;
 let pendingWaveformMode = 'manual'; // 'manual' | 'silent' | 'auto'
-let lastConsumptionSaveTime = Date.now();
-let lastTelemetrySaveMs = 0;
-let telemetryAccumulator = {
-  count: 0, sumV: 0, sumI: 0, sumPa: 0, sumPap: 0, sumPr: 0, sumFp: 0, sumThd: 0, faultFlagsOr: 0
-};
 
 let latestAlertTimeout = null;
 let lastDisplayedFaultFlags = 0;
@@ -495,17 +489,6 @@ function flushTelemetryAverage() {
   const n = telemetryAccumulator.count;
   if (n === 0) return;
 
-  saveTelemetryToDatabase({
-    v:          telemetryAccumulator.sumV   / n,
-    i:          telemetryAccumulator.sumI   / n,
-    p_activa:   telemetryAccumulator.sumPa  / n,
-    p_aparente: telemetryAccumulator.sumPap / n,
-    p_reactiva: telemetryAccumulator.sumPr  / n,
-    fp:         telemetryAccumulator.sumFp  / n,
-    thd:        telemetryAccumulator.sumThd / n,
-    fault_flags: telemetryAccumulator.faultFlagsOr, // si hubo alguna falla en la ventana, queda registrada
-  });
-
   telemetryAccumulator = { count: 0, sumV: 0, sumI: 0, sumPa: 0, sumPap: 0, sumPr: 0, sumFp: 0, sumThd: 0, faultFlagsOr: 0 };
 }
 
@@ -944,13 +927,6 @@ function onMessageArrived(message) {
       const d = JSON.parse(raw);
       updateDashboard(d);
 
-      accumulateTelemetry(d);
-
-      const nowMs = Date.now();
-      if (nowMs - lastTelemetrySaveMs >= 300000) { // 5 minutos, como los medidores inteligentes de CFE
-        lastTelemetrySaveMs = nowMs;
-        flushTelemetryAverage();
-      }
       $('lastUpdate').textContent = new Date().toLocaleTimeString('es-MX');
 
       // --- Watchdog Dinámico ---
@@ -1874,41 +1850,6 @@ window.clearConsumptionPeriods = async function () {
   renderConsumptionPeriods();
   log('Historial de periodos limpiado en Supabase.', 'warn');
 };
-
-async function saveConsumptionPoint(deltaKwh) {
-  pendingConsumptionKwh += deltaKwh;
-
-  const now = Date.now();
-  const elapsedMs = now - lastConsumptionSaveTime;
-
-  // Guardar cada 60 segundos
-  if (elapsedMs < 300000) return;
-
-  const costResult = calculateTieredEnergyCost(kwhTotal);
-
-  try {
-    const { error } = await db
-      .from('consumption_points')
-      .insert({
-        energy_kwh: Number(pendingConsumptionKwh.toFixed(6)),
-        session_kwh: Number(kwhTotal.toFixed(6)),
-        estimated_cost_mxn: Number(costResult.totalCost.toFixed(2))
-      });
-
-    if (error) {
-      log(`Error guardando consumo DB: ${error.message}`, 'error');
-      return;
-    }
-
-    pendingConsumptionKwh = 0;
-    lastConsumptionSaveTime = now;
-
-    renderConsumptionChartByRange(consumptionChartRange);
-    updateEnergyCost();
-  } catch (e) {
-    log(`Error DB consumo: ${e.message}`, 'error');
-  }
-}
 
 // ------------------------------------------------------------------
 // Gráfica de Armónicos THD
@@ -3153,8 +3094,6 @@ function _scheduleKwhTick() {
 
     kwhTotal += deltaKwh;
 
-    saveConsumptionPoint(deltaKwh);
-
     $('kwh-session').textContent = kwhTotal.toFixed(4) + ' kWh';
     const _kwhPow2 = $('kwh-power'); if (_kwhPow2) _kwhPow2.textContent = lastPowerW.toFixed(1) + ' W';
 
@@ -3162,8 +3101,6 @@ function _scheduleKwhTick() {
     const sessionCost = calculateTieredEnergyCost(kwhTotal);
     const costSessionEl = $('cost-session');
     if (costSessionEl) costSessionEl.textContent = '$' + sessionCost.totalCost.toFixed(4) + ' MXN';
-
-    
 
     const elapsed = Math.floor((Date.now() - kwhStartTime) / 1000);
     const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
@@ -3195,6 +3132,9 @@ window.resetKwh = function () {
   if (periodStartTime && kwhTotal > periodStartKwh) {
     saveConsumptionPeriod();
   }
+
+  // Avisar al ESP32 para que cierre la sesión actual y abra una nueva
+  publishToAllDevices('control/reset_sesion', '1');
 
   // Reiniciar contador de energía
   kwhTotal = 0;
@@ -3463,6 +3403,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
   renderPowerChartByRange('hour');
   renderConsumptionChartByRange('day');
+
+  setInterval(() => {
+    renderConsumptionChartByRange(consumptionChartRange, consumptionChartRangeOffset);
+  }, 300000);
 
   renderPowerAlerts();
   renderConsumptionPeriods();
