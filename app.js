@@ -177,15 +177,15 @@ const FAULTS = {
     label: 'Sin voltaje detectado',
     severity: 'error'
   },
-  FAULT_NO_LOAD: {
+  FAULT_CURRENT_RELAY_CLOSED: {
     bit: 8,
-    label: 'Sin corriente cuando se esperaba carga',
+    label: 'Corriente no detectada con relé cerrado',
     severity: 'warn'
   },
-  FAULT_CURRENT_WHEN_RELAY_OPEN: {
+  FAULT_CURRENT_RELAY_OPEN: {
     bit: 9,
     label: 'Corriente detectada con relé abierto',
-    severity: 'error'
+    severity: 'warn'
   },
   FAULT_ADC_SATURATION: {
     bit: 10,
@@ -224,14 +224,19 @@ const FAULTS = {
   },
   FAULT_HIGH_POWER: {
     bit: 17,
-    label: 'Potencia elevada',
+    label: 'Límite superior de potencia',
     severity: 'warn'
   },
   FAULT_UNDERPOWER: {
     bit: 18,
     label: 'Subcarga de potencia',
     severity: 'error'
-  }
+  },
+  FAULT_LOW_POWER: {
+    bit: 19,
+    label: 'Límite inferior de potencia',
+    severity: 'warn'
+  },
 };
 
 const CFE_TARIFFS = {
@@ -3367,7 +3372,7 @@ window.sendSampleRate = function () {
   applySampleRate(sampleValue);
 };
 
-// 4. Comando de comportamiento sin carga (FAULT_NO_LOAD)
+// 4. Comando de comportamiento sin carga
 // Control path: control/no_load_action
 // Payload: "OFF"  → desconectar salida automáticamente cuando no hay corriente
 //          "KEEP" → mantener salida encendida aunque no haya corriente
