@@ -137,106 +137,61 @@ function publishToAllDevices(controlPath, payload) {
 }
 
 const FAULTS = {
-  FAULT_OVERCURRENT: {
-    bit: 0,
-    label: 'Sobrecorriente',
-    severity: 'error'
-  },
   FAULT_OVERVOLTAGE: {
     bit: 1,
-    label: 'Sobrevoltaje',
-    severity: 'error'
+    label: 'Alto voltaje',
+    severity: 'warn'
   },
   FAULT_UNDERVOLTAGE: {
     bit: 2,
     label: 'Bajo voltaje',
     severity: 'warn'
   },
-  FAULT_OVERPOWER: {
+  FAULT_OVERCURRENT: {
     bit: 3,
+    label: 'Alta corriente',
+    severity: 'error'
+  },
+  FAULT_UNDERCURRENT: {
+    bit: 4,
+    label: 'Baja corriente',
+    severity: 'error'
+  },
+  FAULT_OVERPOWER: {
+    bit: 5,
     label: 'Sobrecarga de potencia',
     severity: 'error'
   },
-  FAULT_FREQUENCY_OUT_OF_RANGE: {
-    bit: 4,
-    label: 'Frecuencia fuera de rango',
-    severity: 'warn'
-  },
-  FAULT_HIGH_THD: {
-    bit: 5,
-    label: 'THD elevado',
-    severity: 'warn'
-  },
-  FAULT_POWER_FACTOR_TOO_LOW: {
+  FAULT_UNDERPOWER: {
     bit: 6,
-    label: 'Factor de potencia bajo',
-    severity: 'warn'
-  },
-  FAULT_NO_VOLTAGE: {
-    bit: 7,
-    label: 'Sin voltaje detectado',
+    label: 'Subcarga de potencia',
     severity: 'error'
   },
-  FAULT_CURRENT_RELAY_CLOSED: {
+  FAULT_HIGH_POWER: {
+    bit: 7,
+    label: 'Potencia acercándose al límite superior',
+    severity: 'warn'
+  },
+  FAULT_LOW_POWER: {
     bit: 8,
+    label: 'Potencia acercándose al límite inferior',
+    severity: 'warn'
+  },
+  FAULT_CURRENT_RELAY_CLOSED: {
+    bit: 9,
     label: 'Corriente no detectada con relé cerrado',
     severity: 'warn'
   },
   FAULT_CURRENT_RELAY_OPEN: {
-    bit: 9,
+    bit: 10,
     label: 'Corriente detectada con relé abierto',
     severity: 'warn'
   },
-  FAULT_ADC_SATURATION: {
-    bit: 10,
-    label: 'Saturación del ADC',
-    severity: 'error'
-  },
-  FAULT_ADC_DISCONNECTED: {
-    bit: 11,
-    label: 'ADC desconectado',
-    severity: 'error'
-  },
-  FAULT_ZERO_CROSS_MISSING: {
-    bit: 12,
-    label: 'Cruce por cero ausente',
-    severity: 'error'
-  },
-  FAULT_ZERO_CROSS_STUCK: {
-    bit: 13,
-    label: 'Cruce por cero bloqueado',
-    severity: 'error'
-  },
-  FAULT_RELAY_WELDED: {
-    bit: 14,
-    label: 'Relé soldado',
-    severity: 'error'
-  },
-  FAULT_RELAY_FAILED_TO_CLOSE: {
-    bit: 15,
-    label: 'Relé no cerró',
-    severity: 'error'
-  },
   FAULT_RELAY_FAILED_TO_OPEN: {
-    bit: 16,
-    label: 'Relé no abrió',
+    bit: 12,
+    label: 'Falla en abrir el relé',
     severity: 'error'
-  },
-  FAULT_HIGH_POWER: {
-    bit: 17,
-    label: 'Límite superior de potencia',
-    severity: 'warn'
-  },
-  FAULT_UNDERPOWER: {
-    bit: 18,
-    label: 'Subcarga de potencia',
-    severity: 'error'
-  },
-  FAULT_LOW_POWER: {
-    bit: 19,
-    label: 'Límite inferior de potencia',
-    severity: 'warn'
-  },
+  }
 };
 
 const CFE_TARIFFS = {
@@ -631,7 +586,9 @@ function _renderNextAlertModal() {
 
   const closeModal = () => {
     if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    // Si hay más en cola, mostrar la siguiente con pequeño delay
+    if (fault.severity !== 'error') {
+      publishToAllDevices('control/ack_advertencia', '1');
+    }
     if (alertModalQueue.length > 0) {
       setTimeout(_renderNextAlertModal, 300);
     } else {
@@ -996,7 +953,7 @@ function onMessageArrived(message) {
           code === 'FAULT_OVERCURRENT' ||
           code === 'FAULT_OVERPOWER'   ||
           code === 'FAULT_UNDERPOWER'  ||
-          code === 'FAULT_RELAY_WELDED'
+          code === 'FAULT_RELAY_FAILED_TO_OPEN'
         )) {
           relayOn = false;
           const btn  = $('onoffBtn');
