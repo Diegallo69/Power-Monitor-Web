@@ -831,6 +831,8 @@ function onConnected(topic) {
   client.subscribe('smartcontact/+/estado/limite_potencia_max');
   client.subscribe('smartcontact/+/estado/limite_potencia_min');
 
+  client.subscribe('smartcontact/+/estado/tiempo_muestreo');
+
   client.subscribe('smartcontact/+/telemetria/armonicos', {
     onSuccess: () => log(`✔ Suscripción a armónicos (todos los dispositivos) confirmada.`, 'success'),
     onFailure: err => log(`Error suscripción armónicos: ${err.errorMessage}`, 'error'),
@@ -1057,7 +1059,7 @@ function onMessageArrived(message) {
   $('powerLimit').value       = v;
   $('powerLimitSlider').value = Math.min(1200, v);
   log(`Sincronización: límite de potencia -> ${v} W`, 'success');
-}
+  }
 
   else if (topic.match(/^smartcontact\/.+\/estado\/limite_potencia_min$/)) {
     const v = parseInt(raw) || 0;
@@ -1065,6 +1067,12 @@ function onMessageArrived(message) {
     $('powerLimitMinSlider').value = v;
     log(`Sincronización: límite mínimo de potencia -> ${v} W`, 'success');
   }
+
+  else if (topic.match(/^smartcontact\/.+\/estado\/tiempo_muestreo$/)) {
+  const v = parseInt(raw) || 1;
+  $('sampleRate').value = v;
+  log(`Sincronización: tiempo de muestreo -> ${v} s`, 'success');
+  } 
 
   // ============================================================
   // FLUJO D: Armónicos THD en vivo
