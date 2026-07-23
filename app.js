@@ -828,6 +828,9 @@ function onConnected(topic) {
   // Suscripción al estado físico de la carga de todos los dispositivos
   client.subscribe('smartcontact/+/estado/no_load_action');
 
+  client.subscribe('smartcontact/+/estado/limite_potencia_max');
+  client.subscribe('smartcontact/+/estado/limite_potencia_min');
+
   client.subscribe('smartcontact/+/telemetria/armonicos', {
     onSuccess: () => log(`✔ Suscripción a armónicos (todos los dispositivos) confirmada.`, 'success'),
     onFailure: err => log(`Error suscripción armónicos: ${err.errorMessage}`, 'error'),
@@ -923,6 +926,7 @@ function onMessageArrived(message) {
       // cleared: true si las fallas fueron resueltas
 
       const activeMask  = Number(payload.active  ?? payload.flags ?? 0);
+      const newMask     = Number(payload.flags   ?? payload.active ?? 0);
       const timestampMs = Number(payload.timestamp ?? 0) * 1000;
       const cleared     = payload.cleared === true;
 
@@ -941,7 +945,7 @@ function onMessageArrived(message) {
 
       // Descomponer el bitmask en fallas individuales usando FAULTS
       const fallasActivas = Object.entries(FAULTS).filter(([, info]) => {
-        return (activeMask & (1 << info.bit)) !== 0;
+        return (newMask & (1 << info.bit)) !== 0;
       });
 
       fallasActivas.forEach(([code, info]) => {
@@ -1046,6 +1050,20 @@ function onMessageArrived(message) {
       keepBtn.classList.toggle('active', estadoNoLoad === 'KEEP');
     }
     log(`Sincronización: comportamiento sin carga -> ${estadoNoLoad}`, 'success');
+  }
+
+  else if (topic.match(/^smartcontact\/.+\/estado\/limite_potencia_max$/)) {
+  const v = parseInt(raw) || 0;
+  $('powerLimit').value       = v;
+  $('powerLimitSlider').value = Math.min(1200, v);
+  log(`Sincronización: límite de potencia -> ${v} W`, 'success');
+}
+
+  else if (topic.match(/^smartcontact\/.+\/estado\/limite_potencia_min$/)) {
+    const v = parseInt(raw) || 0;
+    $('powerLimitMin').value       = v;
+    $('powerLimitMinSlider').value = v;
+    log(`Sincronización: límite mínimo de potencia -> ${v} W`, 'success');
   }
 
   // ============================================================
