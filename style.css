@@ -26,6 +26,7 @@
   --accent-normal: #39ff14;
   --accent-warn:   #ffcc00;
   --accent-alert:  #ff0d00;
+  --accent-info:   #1198ff;
   --status-off:    #707070;
   --status-good:   #39ff14;
   --status-warn:   #ffcc00;
@@ -1069,6 +1070,7 @@ main {
 .log-warn    { color: var(--accent-warn); }
 .log-error   { color: var(--accent-alert); }
 .log-success { color: var(--accent-normal); }
+.log-connect { color: var(--accent-info); }
 
 
 /* ============================================================

@@ -101,7 +101,15 @@ const LIMITS = { v: 250, i: 10 };
 // El dashboard extrae el device ID del tópico y lo guarda aquí.
 // Así publishToAllDevices() sabe a cuántos y cuáles enviar.
 // ------------------------------------------------------------------
-const knownDevices = new Set(['contacto_01']); // seed: el dispositivo hardcodeado
+const knownDevices = new Set(['contacto_01']);
+
+const DEVICE_DISPLAY_NAMES = {
+  contacto_01: 'Power-Monitor'
+};
+
+function getDeviceDisplayName(deviceId) {
+  return DEVICE_DISPLAY_NAMES[deviceId] || deviceId;
+}
 
 function registerDeviceFromTopic(topic) {
   // Los tópicos siguen el patrón: smartcontact/<device_id>/...
@@ -511,13 +519,27 @@ function scheduleHideLatestAlert() {
 // ------------------------------------------------------------------
 let alertModalQueue = [];
 let alertModalVisible = false;
+let currentModalFault = null;      
+let currentModalOverlayEl = null;
 
 function showAlertModal(faults) {
-  // faults: array de { label, severity }
   if (!faults || faults.length === 0) return;
 
-  // Encolar todas las fallas nuevas
-  faults.forEach(f => alertModalQueue.push(f));
+  faults.forEach(f => {
+    if (f.isConnectivity && f.connectivityKey) {
+      alertModalQueue = alertModalQueue.filter(q => q.connectivityKey !== f.connectivityKey);
+
+      if (currentModalFault && currentModalFault.connectivityKey === f.connectivityKey) {
+        if (currentModalOverlayEl && currentModalOverlayEl.parentNode) {
+          currentModalOverlayEl.parentNode.removeChild(currentModalOverlayEl);
+        }
+        currentModalFault = null;
+        currentModalOverlayEl = null;
+        alertModalVisible = false;
+      }
+    }
+    alertModalQueue.push(f);
+  });
 
   if (!alertModalVisible) {
     _renderNextAlertModal();
@@ -532,6 +554,7 @@ function _renderNextAlertModal() {
 
   alertModalVisible = true;
   const fault = alertModalQueue.shift();
+  currentModalFault = fault;
 
   // Crear overlay
   const overlay = document.createElement('div');
@@ -544,8 +567,9 @@ function _renderNextAlertModal() {
   `;
 
   const isError = fault.severity === 'error';
-  const accentColor = isError ? 'var(--accent-alert)' : 'var(--accent-warn)';
-  const iconChar = isError ? '🚨' : '⚠️';
+  const isInfo  = fault.severity === 'info';
+  const accentColor = isError ? 'var(--accent-alert)' : isInfo ? 'var(--accent-info)' : 'var(--accent-warn)';
+  const iconChar     = isError ? '🚨' : isInfo ? 'ℹ️' : '⚠️';
 
   const box = document.createElement('div');
   box.style.cssText = `
@@ -567,7 +591,7 @@ function _renderNextAlertModal() {
   box.innerHTML = `
     <div style="font-size:38px;margin-bottom:12px">${iconChar}</div>
     <div style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:${accentColor};margin-bottom:8px">
-      ${isError ? 'ALERTA CRÍTICA' : 'ADVERTENCIA'}
+      ${isError ? 'ALERTA CRÍTICA' : isInfo ? 'INFORMATIVO' : 'ADVERTENCIA'}
     </div>
     <div style="font-size:18px;font-weight:600;margin-bottom:20px">${fault.label}</div>
     <div style="font-size:11px;color:var(--text-dim);margin-bottom:20px">${new Date().toLocaleString('es-MX')}</div>
@@ -583,12 +607,15 @@ function _renderNextAlertModal() {
 
   overlay.appendChild(box);
   document.body.appendChild(overlay);
+  currentModalOverlayEl = overlay;
 
   const closeModal = () => {
     if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    if (fault.severity !== 'error') {
+    if (fault.severity !== 'error' && !fault.isConnectivity) {  
       publishToAllDevices('control/ack_advertencia', '1');
     }
+    currentModalFault = null;         
+    currentModalOverlayEl = null;
     if (alertModalQueue.length > 0) {
       setTimeout(_renderNextAlertModal, 300);
     } else {
@@ -780,12 +807,15 @@ function connect() {
     userName:   'esp32_power_monitor',
     password:   'Power-Monitor69',
     timeout:    8,
-    keepAliveInterval: 30,
+    keepAliveInterval: 7.5,
   });
 }
 
+let manualDisconnect = false;
+
 function disconnect() {
   if (dataWatchdog) { clearTimeout(dataWatchdog); dataWatchdog = null; }
+  manualDisconnect = true;
   if (client && connected) client.disconnect();
   connected = false;
   setStatus(false);
@@ -798,6 +828,8 @@ function disconnect() {
 
   setSystemOffline();
   log('Desconectado manualmente.', 'warn');
+
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 }
 
 // ------------------------------------------------------------------
@@ -807,6 +839,21 @@ function onConnected(topic) {
   connected = true;
   setStatus(true);
   log(`Conectado. Suscrito a "${topic}"`, 'success');
+
+  reconnectAttempts = 0;
+
+  if (dashboardDisconnected) {
+    showAlertModal([{
+      label: 'Conexión del dashboard restablecida',
+      severity: 'info',
+      isConnectivity: true,
+      connectivityKey: 'dashboard'
+    }]);
+    dashboardWasDisconnected = false;
+  }
+  firstConnection = false;
+
+  client.subscribe('smartcontact/+/estado/conexion');
 
   // 1. Suscripción a la telemetría (la que el usuario pone en la interfaz)
   client.subscribe(topic, {
@@ -860,6 +907,11 @@ function onConnected(topic) {
   }, 1000);
 }
 
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let firstConnection = true;
+let dashboardDisconnected = false;
+
 function onConnectionLost(res) {
   connected = false;
   setStatus(false);
@@ -867,13 +919,43 @@ function onConnectionLost(res) {
   const btn = $('connectBtn');
   btn.textContent = 'Conectar';
   btn.classList.remove('disconnect');
-  
+
   setSystemOffline();
+
+  if (!manualDisconnect) {
+    if (!firstConnection) {              
+      showAlertModal([{
+        label: 'Conexión del dashboard perdida',
+        severity: 'info',
+        isConnectivity: true,
+        connectivityKey: 'dashboard'
+      }]);
+      dashboardDisconnected = true;
+    }
+    scheduleReconnect();
+  }
+  manualDisconnect = false;             
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return; 
+  reconnectAttempts++;
+  const delayMs = Math.min(30000, 2000 * reconnectAttempts); // backoff: 2s, 4s, 6s... tope 30s
+  log(`Reintentando conexión en ${delayMs / 1000}s…`, 'info');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delayMs);
 }
 
 function onConnectFailed(err) {
   log(`No se pudo conectar: ${err.errorMessage}`, 'error');
+  if (!manualDisconnect) {
+    scheduleReconnect();
+  }
 }
+
+const lastConnState = {};
 
 function onMessageArrived(message) {
   const topic = message.destinationName;
@@ -885,10 +967,37 @@ function onMessageArrived(message) {
     registerDeviceFromTopic(topic);
   }
 
+  if (topic.match(/^smartcontact\/(.+)\/estado\/conexion$/)) {
+    const deviceId = topic.match(/^smartcontact\/(.+)\/estado\/conexion$/)[1];
+    const state = raw.trim().toLowerCase(); // "online" | "offline"
+    const previousState = lastConnState[deviceId];
+
+    if (previousState !== state) {
+      lastConnState[deviceId] = state;
+      saveConnectionEvent(deviceId, state);
+
+      if (state === 'offline') {
+        showAlertModal([{
+          label: `"${getDeviceDisplayName(deviceId)}" desconectado`,
+          severity: 'info',
+          isConnectivity: true,
+          connectivityKey: `device:${deviceId}`
+        }]);
+      } else if (state === 'online' && previousState === 'offline') {
+        showAlertModal([{
+          label: `"${getDeviceDisplayName(deviceId)}" reconectado`,
+          severity: 'info',
+          isConnectivity: true,
+          connectivityKey: `device:${deviceId}`
+        }]);
+      }
+    }
+  }
+
   // ============================================================
   // FLUJO A: Telemetría normal (Datos para tus gráficas)
   // ============================================================
-  if (topic === telemetriaTopic || topic.match(/^smartcontact\/.+\/telemetria\/estado$/)) {
+  else if (topic === telemetriaTopic || topic.match(/^smartcontact\/.+\/telemetria\/estado$/)) {
     log(`← ${raw}`, 'data');
     try {
       const d = JSON.parse(raw);
@@ -1837,6 +1946,120 @@ window.clearConsumptionPeriods = async function () {
 
   renderConsumptionPeriods();
   log('Historial de periodos limpiado en Supabase.', 'warn');
+};
+
+async function saveConnectionEvent(deviceId, state) {
+  const record = {
+    device_id:  deviceId,
+    event:      state,
+    event_time: new Date().toISOString()
+  };
+
+  try {
+    const { error } = await db.from('connection_history').insert(record);
+    if (error) {
+      log(`Error guardando historial de conexión: ${error.message}`, 'error');
+      return;
+    }
+    log(`${state === 'online' ? '🟢' : '🔴'} ${deviceId}: ${state}`, state === 'online' ? 'info' : 'warn');
+    renderConnectionPeriods();
+  } catch (e) {
+    log(`Error DB conexión: ${e.message}`, 'error');
+  }
+}
+
+async function fetchConnectionHistoryFromDatabase(limit = 300) {
+  const { data, error } = await db
+    .from('connection_history')
+    .select('device_id, event, event_time')
+    .order('event_time', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    log(`Error leyendo historial de conexión DB: ${error.message}`, 'error');
+    return [];
+  }
+  return (data || []).reverse(); // volver a orden cronológico ascendente
+}
+
+function buildConnectionPeriods(events) {
+  const byDevice = {};
+  events.forEach(ev => {
+    (byDevice[ev.device_id] ||= []).push(ev);
+  });
+
+  const periods = [];
+
+  Object.entries(byDevice).forEach(([deviceId, evs]) => {
+    let openStart = null;
+    evs.forEach(ev => {
+      if (ev.event === 'online' && openStart === null) {
+        openStart = ev.event_time;
+      } else if (ev.event === 'offline' && openStart !== null) {
+        periods.push({ deviceId, start: openStart, end: ev.event_time });
+        openStart = null;
+      }
+    });
+    if (openStart !== null) {
+      periods.push({ deviceId, start: openStart, end: null }); // sigue conectado
+    }
+  });
+
+  periods.sort((a, b) => new Date(b.start) - new Date(a.start)); // más reciente primero
+  return periods;
+}
+
+function formatDurationMs(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+  const m = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+  const s = String(totalSec % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+async function renderConnectionPeriods() {
+  const body = $('connectionPeriodsBody');
+  if (!body) return;
+
+  const events = await fetchConnectionHistoryFromDatabase();
+  const periods = buildConnectionPeriods(events);
+
+  body.innerHTML = '';
+
+  if (periods.length === 0) {
+    const emptyLine = document.createElement('div');
+    emptyLine.className = 'log-line log-info';
+    emptyLine.textContent = 'No hay periodos registrados.';
+    body.appendChild(emptyLine);
+    return;
+  }
+
+  periods.forEach(p => {
+    const startStr = new Date(p.start).toLocaleString('es-MX');
+    const endStr = p.end ? new Date(p.end).toLocaleString('es-MX') : 'En curso';
+    const durationMs = (p.end ? new Date(p.end) : new Date()) - new Date(p.start);
+    const label = getDeviceDisplayName(p.deviceId);
+
+    const line = document.createElement('div');
+    line.className = p.end ? 'log-line log-connect' : 'log-line log-success';
+    line.textContent = `[${startStr}] → [${endStr}] | ${formatDurationMs(durationMs)}`;
+    body.appendChild(line);
+  });
+}
+
+window.clearConnectionHistory = async function () {
+  const { error } = await db
+    .from('connection_history')
+    .delete()
+    .neq('id', 0);
+
+  if (error) {
+    log(`Error limpiando historial de conexión DB: ${error.message}`, 'error');
+    return;
+  }
+
+  renderConnectionPeriods();
+  log('Historial de periodos de conexión limpiado en Supabase.', 'warn');
 };
 
 // ------------------------------------------------------------------
@@ -3328,7 +3551,6 @@ window.toggleRelay = function () {
   publishMessage(topic, payload);
   log(`▸ Comando enviado: Relé -> ${payload} (Esperando confirmación física...)`, 'info');
 
-  // ⛔ NO cambiamos la variable relayOn ni los colores del botón aquí.
 };
 
 // 2. Comando de Límite de Potencia
@@ -3391,6 +3613,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   renderPowerChartByRange('hour');
   renderConsumptionChartByRange('day');
+  renderConnectionPeriods();
 
   setInterval(() => {
     renderConsumptionChartByRange(consumptionChartRange, consumptionChartRangeOffset);
