@@ -68,40 +68,37 @@ async function testDatabaseConnection() {
       .select('id, created_at')
       .limit(1);
 
-    if (error) {
-      log(`Error conectando a Supabase: ${error.message}`, 'error');
-      return;
-    }
-
-    log('Conexión a Supabase correcta.', 'success');
+    if (error) throw new Error(error.message);
+      
+    log('☑ Conectado a base de datos', 'success');
   } catch (e) {
-    log(`Error Supabase: ${e.message}`, 'error');
+    log(`⚠ Error: Conectado a base de datos: ${e.message}`, 'error');
   }
 }
 
 
 // Acumulador de energía (kWh)
 let kwhTotal      = 0;       // kWh acumulados en sesión
-let kwhStartTime  = null;    // timestamp de inicio de sesión
 let lastPowerW    = 0;       // última potencia activa recibida (W)
 let kwhTimerInterval = null;
 let lastFaultFlags = 0;
+let lastAlertsActiveMask = 0;
 
 let dataWatchdog = null;
 
 let periodStartTime = null;
 let periodStartKwh = 0;
+let periodStartTimeMs = null; 
 
 // Límites para las barras de progreso
 const LIMITS = { v: 250, i: 10 };
 
 // ------------------------------------------------------------------
 // Registro dinámico de dispositivos detectados
-// Se puebla automáticamente al recibir telemetría de cualquier ESP32.
-// El dashboard extrae el device ID del tópico y lo guarda aquí.
 // Así publishToAllDevices() sabe a cuántos y cuáles enviar.
 // ------------------------------------------------------------------
 const knownDevices = new Set(['contacto_01']);
+let activeDeviceId = 'contacto_01';
 
 const DEVICE_DISPLAY_NAMES = {
   contacto_01: 'Power-Monitor'
@@ -112,36 +109,46 @@ function getDeviceDisplayName(deviceId) {
 }
 
 function registerDeviceFromTopic(topic) {
-  // Los tópicos siguen el patrón: smartcontact/<device_id>/...
   const parts = topic.split('/');
   if (parts.length >= 2 && parts[0] === 'smartcontact') {
     const deviceId = parts[1];
     if (deviceId && !knownDevices.has(deviceId)) {
       knownDevices.add(deviceId);
-      log(`✔ Nuevo dispositivo detectado: ${deviceId} (total: ${knownDevices.size})`, 'success');
+      log(`Nuevo dispositivo detectado: ${deviceId} (total: ${knownDevices.size})`, 'success');
     }
   }
 }
 
-// Publica un mensaje en el tópico de control de CADA dispositivo conocido.
-// Usa el mismo patrón de Paho que publishMessage (que sí funciona con toggleRelay).
-function publishToAllDevices(controlPath, payload) {
+let historyLoadLogged = { alerts: false, consume: false, connect: false };
+
+const CONTROL_LABELS = {
+  'control/rele':               'Control de relé',
+  'control/no_load_action':     'Control de carga',
+  'control/limite_potencia':    'Limite superior de potencia',
+  'control/limite_potencia_min':'Limite inferior de potencia',
+  'control/tiempo_muestreo':    'Tiempo de muestreo',
+  'control/reset_sesion':       'Reinicio de sesión',
+  'control/waveform/request':   'Reinicio de diagnóstico',
+  'control/ack_advertencia':    'Confirmación de advertencia'
+};
+
+function publishControl(controlPath, payload, silent = false) {
+  const label = CONTROL_LABELS[controlPath] || controlPath;
   if (!connected || !client) {
-    log('Error: No conectado. No se puede enviar comando.', 'error');
-    return;
+    if (!silent) log(`⚠ Error: No conectado. No se puede enviar comando: ${label}`, 'error');
+    return false;
   }
-  const payloadStr = payload.toString();
-  knownDevices.forEach(deviceId => {
-    const topic = `smartcontact/${deviceId}/${controlPath}`;
-    const msg = new Paho.MQTT.Message(payloadStr);
+  const topic = `smartcontact/${activeDeviceId}/${controlPath}`;
+  try {
+    const msg = new Paho.MQTT.Message(payload.toString());
     msg.destinationName = topic;
-    try {
-      client.send(msg);
-      log(`▸ [${topic}] → ${payloadStr}`, 'success');
-    } catch (e) {
-      log(`Error enviando a ${topic}: ${e.message}`, 'error');
-    }
-  });
+    client.send(msg);
+    if (!silent) log(`→ Comando enviado: ${label} -> ${payload}`, 'success');
+    return true;
+  } catch (e) {
+    if (!silent) log(`⚠ Error: Enviando comando ${label}: ${e.message}`, 'error');
+    return false;
+  }
 }
 
 const FAULTS = {
@@ -199,6 +206,31 @@ const FAULTS = {
     bit: 12,
     label: 'Falla en abrir el relé',
     severity: 'error'
+  },
+   FAULT_SENSOR_ADC_DISCONNECTED: {
+    bit: 13,
+    label: 'Sensor ADC desconectado (sin señal)',
+    severity: 'error'
+  },
+  FAULT_SENSOR_ZCM_DISCONNECTED: {
+    bit: 14,
+    label: 'Sensor ZCM desconectado (sin señal)',
+    severity: 'error'
+  },
+  FAULT_SENSOR_ADC_INVALID: {
+    bit: 15,
+    label: 'Señal de sensor ADC inválida',
+    severity: 'error'
+  },
+  FAULT_SENSOR_ZCM_INVALID: {
+    bit: 16,
+    label: 'Señal de sensor ZCM inválida',
+    severity: 'error'
+  },
+  FAULT_FREQUENCY_OUT_OF_RANGE: {
+    bit: 17,
+    label: 'Frecuencia de línea fuera de rango',
+    severity: 'warn'
   }
 };
 
@@ -329,7 +361,6 @@ window.onTariffChange = function (code) {
   selectedTariffCode = code;
   localStorage.setItem('selectedTariffCode', code);
   updateEnergyCost();
-  log(`Tarifa cambiada a ${CFE_TARIFFS[code].name}`, 'warn');
 };
 
 function createCustomSelect(rootId, onSelect) {
@@ -410,54 +441,6 @@ function getActiveFaults(faultFlags) {
   });
 
   return activeFaults;
-}
-
-// ------------------------------------------------------------------
-// Guardado de telemetría en Supabase (con promediado por ventana)
-// ------------------------------------------------------------------
-async function saveTelemetryToDatabase(d) {
-  try {
-    const { error } = await db
-      .from('telemetry')
-      .insert({
-        voltage: d.v ?? null,
-        current: d.i ?? null,
-        active_power: d.p_activa ?? null,
-        apparent_power: d.p_aparente ?? null,
-        reactive_power: d.p_reactiva ?? null,
-        power_factor: d.fp ?? null,
-        thd: d.thd ?? null,
-        fault_flags: d.fault_flags ?? null
-      });
-
-    if (error) {
-      log(`Error guardando telemetría DB: ${error.message}`, 'error');
-      return;
-    }
-
-    log('Telemetría guardada en Supabase.', 'success');
-  } catch (e) {
-    log(`Error DB telemetría: ${e.message}`, 'error');
-  }
-}
-
-function accumulateTelemetry(d) {
-  telemetryAccumulator.count++;
-  if (d.v          !== undefined) telemetryAccumulator.sumV   += Number(d.v);
-  if (d.i          !== undefined) telemetryAccumulator.sumI   += Number(d.i);
-  if (d.p_activa   !== undefined) telemetryAccumulator.sumPa  += Number(d.p_activa);
-  if (d.p_aparente !== undefined) telemetryAccumulator.sumPap += Number(d.p_aparente);
-  if (d.p_reactiva !== undefined) telemetryAccumulator.sumPr  += Number(d.p_reactiva);
-  if (d.fp         !== undefined) telemetryAccumulator.sumFp  += Number(d.fp);
-  if (d.thd        !== undefined) telemetryAccumulator.sumThd += Number(d.thd);
-  if (d.fault_flags !== undefined) telemetryAccumulator.faultFlagsOr |= Number(d.fault_flags);
-}
-
-function flushTelemetryAverage() {
-  const n = telemetryAccumulator.count;
-  if (n === 0) return;
-
-  telemetryAccumulator = { count: 0, sumV: 0, sumI: 0, sumPa: 0, sumPap: 0, sumPr: 0, sumFp: 0, sumThd: 0, faultFlagsOr: 0 };
 }
 
 // ------------------------------------------------------------------
@@ -612,7 +595,7 @@ function _renderNextAlertModal() {
   const closeModal = () => {
     if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
     if (fault.severity !== 'error' && !fault.isConnectivity) {  
-      publishToAllDevices('control/ack_advertencia', '1');
+      publishControl('control/ack_advertencia', '1');
     }
     currentModalFault = null;         
     currentModalOverlayEl = null;
@@ -659,7 +642,7 @@ const els = {
 // Conectar / Desconectar
 // ------------------------------------------------------------------
 window.toggleConnection = function () {
-  connected ? disconnect() : connect();
+  connected ? disconnect() : connect(true);
 };
 
 function startOfToday() {
@@ -699,6 +682,16 @@ function updateHourNavClock() {
 }
 
 setInterval(updateHourNavClock, 1000);
+setInterval(updateSessionTimerDisplay, 1000);
+
+setInterval(() => {
+  if (liveConnectionPeriodEl && liveConnectionPeriodStart) {
+    const startStr = new Date(liveConnectionPeriodStart).toLocaleString('es-MX');
+    const durationMs = Date.now() - new Date(liveConnectionPeriodStart);
+    liveConnectionPeriodEl.textContent = `[${startStr}] → [En curso] | ${formatDurationMs(durationMs)}`;
+  }
+  updateLiveConsumptionPeriodLine();
+}, 1000);
 
 function startOfWeekMonday(ms) {
   const d = new Date(ms);
@@ -747,20 +740,17 @@ function formatRangeLabel(range, start, end) {
 }
 
 function handleDataTimeout() {
-  log('⚠ Alerta: Se dejó de recibir telemetría. Reiniciando valores a 0.', 'warn');
+  log('⚠ Alerta: Se dejo de recibir telemetría.', 'warn');
 
   // 1. Mandar un objeto con puros ceros para actualizar las tarjetas y la gráfica
   updateDashboard({ 
     v: 0, i: 0, p_activa: 0, p_aparente: 0, p_reactiva: 0, fp: 0, thd: 0 
   });
 
-  // Nota: Al mandar p_activa: 0, lastPowerW se vuelve 0, 
-  // lo que hace que el contador de kWh se congele automáticamente.
-
   // 2. Apagar el relé visualmente por seguridad
   if (relayOn) {
     relayOn = false;
-    saveConsumptionPeriod(); // Guardar el historial de consumo hasta este corte
+    saveConsumptionPeriod();
 
     const btn  = $('onoffBtn');
     const text = $('onoffText');
@@ -774,19 +764,18 @@ function handleDataTimeout() {
   }
 }
 
-function connect() {
+function connect(isManual = false) {
   const host  = '53064f1f1cf946df990d74434c676994.s1.eu.hivemq.cloud';
   const port  = 8884;
   const topic = 'sec/datos';
 
   const clientId = 'sec_dashboard_' + Math.random().toString(16).slice(2, 8);
-  log(`Conectando a ws://${host}:${port} …`, 'info');
+  log(`🛈 Conectando a broker de comunicación...`, 'info');
+  manualConnect = isManual;
 
   client = new Paho.MQTT.Client(host, port, clientId);
   client.onConnectionLost = onConnectionLost;
-  // Paho 1.0.1 falla con mensajes binarios si se accede a payloadString.
-  // Parcheamos onMessageArrived para interceptar el tópico waveform
-  // y leer el ArrayBuffer interno ANTES de que Paho intente decodificar UTF-8.
+
   client.onMessageArrived = function(message) {
     try {
       if (message.destinationName.match(/^smartcontact\/.+\/telemetria\/waveform$/)) {
@@ -794,7 +783,6 @@ function connect() {
         return;
       }
     } catch (e) {
-      log(`Error interceptando waveform: ${e.message}`, 'error');
       return;
     }
     onMessageArrived(message);
@@ -812,6 +800,7 @@ function connect() {
 }
 
 let manualDisconnect = false;
+let manualConnect = false;
 
 function disconnect() {
   if (dataWatchdog) { clearTimeout(dataWatchdog); dataWatchdog = null; }
@@ -827,7 +816,7 @@ function disconnect() {
   }
 
   setSystemOffline();
-  log('Desconectado manualmente.', 'warn');
+  log('⚠ Alerta: Desconectado manualmente.', 'warn');
 
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 }
@@ -838,41 +827,39 @@ function disconnect() {
 function onConnected(topic) {
   connected = true;
   setStatus(true);
-  log(`Conectado. Suscrito a "${topic}"`, 'success');
+  log('☑ Conectado a broker de comunicación', 'success');
 
   reconnectAttempts = 0;
 
-  if (dashboardDisconnected) {
+  if (manualConnect) {
+    log('⚠ Alerta: Conectado manualmente', 'warn');
+  } else if (dashboardDisconnected) {
+    log('☑ Conexión recuperada', 'success');
     showAlertModal([{
       label: 'Conexión del dashboard restablecida',
       severity: 'info',
       isConnectivity: true,
       connectivityKey: 'dashboard'
     }]);
-    dashboardWasDisconnected = false;
+    dashboardDisconnected = false;
   }
+  manualConnect = false;
   firstConnection = false;
 
   client.subscribe('smartcontact/+/estado/conexion');
 
-  // 1. Suscripción a la telemetría (la que el usuario pone en la interfaz)
-  client.subscribe(topic, {
-    onSuccess:  () => log(`✔ Suscripción a "${topic}" confirmada.`, 'success'),
-    onFailure:  (err) => log(`Error suscripción: ${err.errorMessage}`, 'error'),    
-  });
+  // Suscripción a la telemetría (la que el usuario pone en la interfaz)
+  client.subscribe(topic);
 
-  client.subscribe('smartcontact/+/telemetria/estado', {
-    onSuccess: () => log('✔ Suscripción a telemetría/estado (todos los dispositivos) confirmada.', 'success'),
-    onFailure: err => log(`Error suscripción telemetría/estado: ${err.errorMessage}`, 'error'),
-  });  
+  client.subscribe('smartcontact/+/telemetria/estado');  
 
-  // Suscripción a las alertas de todos los dispositivos
+  // Suscripción a las alertas
   client.subscribe('smartcontact/+/alertas');
 
-  // Suscripción al estado físico del relé de todos los dispositivos
+  // Suscripción al estado físico del relé 
   client.subscribe('smartcontact/+/estado/rele');
 
-  // Suscripción al estado físico de la carga de todos los dispositivos
+  // Suscripción al estado físico de la carga 
   client.subscribe('smartcontact/+/estado/no_load_action');
 
   client.subscribe('smartcontact/+/estado/limite_potencia_max');
@@ -880,15 +867,8 @@ function onConnected(topic) {
 
   client.subscribe('smartcontact/+/estado/tiempo_muestreo');
 
-  client.subscribe('smartcontact/+/telemetria/armonicos', {
-    onSuccess: () => log(`✔ Suscripción a armónicos (todos los dispositivos) confirmada.`, 'success'),
-    onFailure: err => log(`Error suscripción armónicos: ${err.errorMessage}`, 'error'),
-  });
-
-  client.subscribe('smartcontact/+/telemetria/waveform', {
-    onSuccess: () => log(`✔ Suscripción a waveform (todos los dispositivos) confirmada.`, 'success'),
-    onFailure: err => log(`Error suscripción waveform: ${err.errorMessage}`, 'error'),
-  });
+  client.subscribe('smartcontact/+/telemetria/armonicos');
+  client.subscribe('smartcontact/+/telemetria/waveform');
 
   const btn = $('connectBtn');
   btn.textContent = 'Desconectar';
@@ -897,13 +877,10 @@ function onConnected(topic) {
   setSystemOnline();
   updateEnergyCost();
 
-  // Iniciar acumulador kWh
-  if (!kwhStartTime) startKwhTimer();
+  startKwhTimer();
 
-  // Diagnóstico de carga automático (silencioso, sin graficar) — se le da
-  // un respiro a las suscripciones MQTT antes de pedirlo.
   setTimeout(() => {
-    requestDiagnosisWaveform();
+    requestDiagnosisWaveform(true);
   }, 1000);
 }
 
@@ -912,10 +889,14 @@ let reconnectAttempts = 0;
 let firstConnection = true;
 let dashboardDisconnected = false;
 
+let liveConnectionPeriodEl = null;
+let liveConnectionPeriodStart = null;
+
 function onConnectionLost(res) {
   connected = false;
   setStatus(false);
-  if (res.errorCode !== 0) log(`Conexión perdida: ${res.errorMessage}`, 'error');
+  if (res.errorCode !== 0) 
+    log(`⚠ Error: Conexión perdida: ${res.errorMessage}`, 'error');
   const btn = $('connectBtn');
   btn.textContent = 'Conectar';
   btn.classList.remove('disconnect');
@@ -940,8 +921,8 @@ function onConnectionLost(res) {
 function scheduleReconnect() {
   if (reconnectTimer) return; 
   reconnectAttempts++;
-  const delayMs = Math.min(30000, 2000 * reconnectAttempts); // backoff: 2s, 4s, 6s... tope 30s
-  log(`Reintentando conexión en ${delayMs / 1000}s…`, 'info');
+  const delayMs = Math.min(30000, 1000 * reconnectAttempts); // backoff: 2s, 4s, 6s... tope 30s
+  log(`🛈 Reintentando conexión en ${delayMs / 1000}s…`, 'info');
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -949,7 +930,7 @@ function scheduleReconnect() {
 }
 
 function onConnectFailed(err) {
-  log(`No se pudo conectar: ${err.errorMessage}`, 'error');
+  log(`⚠ Error: Conectado a broker de comunicación: ${err.errorMessage}`, 'error');
   if (!manualDisconnect) {
     scheduleReconnect();
   }
@@ -998,29 +979,49 @@ function onMessageArrived(message) {
   // FLUJO A: Telemetría normal (Datos para tus gráficas)
   // ============================================================
   else if (topic === telemetriaTopic || topic.match(/^smartcontact\/.+\/telemetria\/estado$/)) {
-    log(`← ${raw}`, 'data');
+    //log(`☑ Recibiendo telemetría`, 'success');
+    //log(`← ${raw}`, 'data');
     try {
       const d = JSON.parse(raw);
       updateDashboard(d);
 
+      // --- Sincronización de sesión (kWh + tiempo) ---
+      if (d.session_active && relayOn) {
+        const elapsedMs = Number(d.session_elapsed_s ?? 0) * 1000;
+        const reportedStartMs = Date.now() - elapsedMs;
+
+        const SESSION_RESET_TOLERANCE_MS = 5000;
+        const isNewSession = !periodStartTimeMs ||
+          (reportedStartMs - periodStartTimeMs) > SESSION_RESET_TOLERANCE_MS;
+
+        if (isNewSession) {
+          if (periodStartTime) {
+            saveConsumptionPeriod();
+          }
+          periodStartTimeMs = reportedStartMs;
+          periodStartTime = new Date(periodStartTimeMs).toLocaleString('es-MX');
+          periodStartKwh = 0;
+
+          if (elapsedMs <= SESSION_RESET_TOLERANCE_MS) {
+            log('🛈 Sesión iniciada.', 'success');
+          }
+          renderConsumptionPeriods();
+        }
+        kwhTotal = Number(d.session_kwh ?? kwhTotal);
+      } else if (periodStartTime) {
+        saveConsumptionPeriod();
+      }
+
       $('lastUpdate').textContent = new Date().toLocaleTimeString('es-MX');
 
-      // --- Watchdog Dinámico ---
       if (dataWatchdog) clearTimeout(dataWatchdog);
-      
-      // 1. Leer el tiempo de muestreo actual de la interfaz (en segundos)
       const tiempoMuestreoSegundos = parseInt($('sampleRate').value) || 1;
-      
-      // 2. Convertir a milisegundos y sumar el margen de tolerancia (2.5s)
-      const toleranciaMs = 2500; 
+      const toleranciaMs = 2500;
       const timeoutDinamicoMs = (tiempoMuestreoSegundos * 1000) + toleranciaMs;
-      
-      // 3. Iniciar el temporizador
       dataWatchdog = setTimeout(handleDataTimeout, timeoutDinamicoMs);
-      // ---------------------------------------------------
 
     } catch (e) {
-      log(`JSON inválido: ${e.message}`, 'error');
+      log(`⚠ Error: Recibiendo telemetría: ${e.message}`, 'error');
     }
   }
   
@@ -1031,39 +1032,40 @@ function onMessageArrived(message) {
     try {
       const payload = JSON.parse(raw);
 
-      // El ESP32 manda: {timestamp, flags, active, severity, cleared}
-      // timestamp: segundos Unix — lo convertimos a ms para Date()
-      // active: bitmask de fallas activas en este momento
-      // cleared: true si las fallas fueron resueltas
-
-      const activeMask  = Number(payload.active  ?? payload.flags ?? 0);
-      const newMask     = Number(payload.flags   ?? payload.active ?? 0);
+      const activeMask  = Number(payload.active ?? 0);
+      const deltaMask   = Number(payload.flags  ?? 0);
       const timestampMs = Number(payload.timestamp ?? 0) * 1000;
       const cleared     = payload.cleared === true;
 
-      // Construir fecha legible desde el timestamp del hardware
-      // Si el timestamp es 0, inválido, o antes del año 2020, usar la fecha actual del navegador
       const MIN_VALID_TS_MS = new Date('2020-01-01').getTime();
       const fechaHardware = (timestampMs > MIN_VALID_TS_MS)
         ? new Date(timestampMs).toLocaleString('es-MX')
         : new Date().toLocaleString('es-MX');
 
-      if (cleared || activeMask === 0) {
-        log(`✔ Alertas resueltas (${fechaHardware})`, 'success');
-        scheduleHideLatestAlert();
+      if (cleared) {
+        Object.entries(FAULTS).forEach(([, info]) => {
+          const bit = 1 << info.bit;
+          if ((deltaMask & bit) !== 0 && (lastAlertsActiveMask & bit) !== 0) {
+            log(`☑ Alerta resuelta [${fechaHardware}]: ${info.label}`, 'success');
+          }
+        });
+
+        lastAlertsActiveMask = activeMask; 
+        showLatestAlert(activeMask);
+
+        if (activeMask === 0) {
+          scheduleHideLatestAlert();
+        }
         return;
       }
 
-      // Descomponer el bitmask en fallas individuales usando FAULTS
       const fallasActivas = Object.entries(FAULTS).filter(([, info]) => {
-        return (newMask & (1 << info.bit)) !== 0;
+        return (deltaMask & (1 << info.bit)) !== 0;
       });
 
       fallasActivas.forEach(([code, info]) => {
-        // Mostrar en el log con nombre legible, no código
-        log(`🚨 ALERTA [${fechaHardware}]: ${info.label}`, info.severity === 'error' ? 'error' : 'warn');
+        log(`⚠ Alerta pendiente [${fechaHardware}]: ${info.label}`, info.severity === 'error' ? 'error' : 'warn');
 
-        // Corte de seguridad visual para fallas críticas
         if (info.severity === 'error' && (
           code === 'FAULT_OVERCURRENT' ||
           code === 'FAULT_OVERPOWER'   ||
@@ -1081,7 +1083,6 @@ function onMessageArrived(message) {
           }
         }
 
-        // Guardar en Supabase con timestamp real del hardware
         saveAlert({
           code,
           label:     info.label,
@@ -1091,65 +1092,53 @@ function onMessageArrived(message) {
         });
       });
 
-      // Mostrar la alerta más prioritaria junto al botón de conectar
-      showLatestAlert(activeMask);
+      lastAlertsActiveMask = activeMask;
 
-      // Abrir modal de notificación para cada falla activa
-      // fallasActivas es [[code, info], ...] — mapear a { label, severity }
+      showLatestAlert(activeMask);
       showAlertModal(fallasActivas.map(([, info]) => ({ label: info.label, severity: info.severity })));
 
     } catch (e) {
-      log(`Error procesando alerta: ${e.message}`, 'error');
+      
     }
-  } 
+  }
   
   // ============================================================
   // FLUJO C: Sincronización física del ESP32
   // ============================================================
   else if (topic.match(/^smartcontact\/.+\/estado\/rele$/)) {
-    const estadoFisico = raw.trim().toUpperCase();
-    
-    const btn  = $('onoffBtn');
-    const text = $('onoffText');
-    const hint = $('onoffHint');
+  const estadoFisico = raw.trim().toUpperCase();
+  const btn  = $('onoffBtn');
+  const text = $('onoffText');
+  const hint = $('onoffHint');
 
-    if (estadoFisico === 'ON') {
-      // Solo si estaba apagado iniciamos el cálculo de consumo
-      if (!relayOn) {
-        relayOn = true;
-        periodStartTime = new Date().toLocaleString('es-MX');
-        periodStartKwh = kwhTotal;
-        setTimeout(() => {
-          requestAutoWaveform();
-        }, 1000);
-        setTimeout(() => {
-          requestHarmonics();
-        }, 1500);
-      }
-      log('Sincronización: Relé encendido físicamente.', 'success');
-      
-      if (btn && text && hint) {
-        btn.className  = 'onoff-btn onoff-on';
-        text.textContent = 'ON';
-        hint.textContent = 'Contacto energizado';
-      }
-    } else if (estadoFisico === 'OFF') {
-      // Solo si estaba prendido cerramos el cálculo de consumo
-      if (relayOn) {
-        relayOn = false;
-        saveConsumptionPeriod();
-        showDiagnosisPlaceholder('Sin carga conectada — sin datos que analizar');
-        clearWaveformAndHarmonicsCharts();
-      }
-      log('Sincronización: Relé apagado físicamente.', 'warn');
-      
-      if (btn && text && hint) {
-        btn.className  = 'onoff-btn onoff-off';
-        text.textContent = 'OFF';
-        hint.textContent = 'Contacto apagado';
-      }
+  if (estadoFisico === 'ON') {
+    if (!relayOn) {
+      relayOn = true;
+      setTimeout(() => { requestAutoWaveform(); }, 1000);
+      setTimeout(() => { requestAutoHarmonics(); }, 1500);
+    }
+    log('🛈 Actualización: Control de relé -> ON', 'success');
+    if (btn && text && hint) {
+      btn.className  = 'onoff-btn onoff-on';
+      text.textContent = 'ON';
+      hint.textContent = 'Contacto energizado';
+    }
+  } else if (estadoFisico === 'OFF') {
+    if (relayOn) {
+      relayOn = false;
+      saveConsumptionPeriod();
+      showDiagnosisPlaceholder('Sin carga conectada — sin datos que analizar');
+      log(`🛈 Diagnóstico fallido`, 'error');
+      clearWaveformAndHarmonicsCharts();
+    }
+    log('🛈 Actualización: Control de relé -> OFF', 'error');
+    if (btn && text && hint) {
+      btn.className  = 'onoff-btn onoff-off';
+      text.textContent = 'OFF';
+      hint.textContent = 'Contacto apagado';
     }
   }
+}
 
   else if (topic.match(/^smartcontact\/.+\/estado\/no_load_action$/)) {
     const estadoNoLoad = raw.trim().toUpperCase(); // "OFF" o "KEEP"
@@ -1160,49 +1149,46 @@ function onMessageArrived(message) {
       offBtn.classList.toggle('active', estadoNoLoad === 'OFF');
       keepBtn.classList.toggle('active', estadoNoLoad === 'KEEP');
     }
-    log(`Sincronización: comportamiento sin carga -> ${estadoNoLoad}`, 'success');
+    log(`🛈 Actualización: Control de carga -> ${estadoNoLoad}`, 'info');
   }
 
   else if (topic.match(/^smartcontact\/.+\/estado\/limite_potencia_max$/)) {
   const v = parseInt(raw) || 0;
   $('powerLimit').value       = v;
   $('powerLimitSlider').value = Math.min(1200, v);
-  log(`Sincronización: límite de potencia -> ${v} W`, 'success');
+  log(`🛈 Actualización: Límite superior de potencia -> ${v} W`, 'info');
   }
 
   else if (topic.match(/^smartcontact\/.+\/estado\/limite_potencia_min$/)) {
     const v = parseInt(raw) || 0;
     $('powerLimitMin').value       = v;
     $('powerLimitMinSlider').value = v;
-    log(`Sincronización: límite mínimo de potencia -> ${v} W`, 'success');
+    log(`🛈 Actualización: Límite inferior de potencia -> ${v} W`, 'info');
   }
 
   else if (topic.match(/^smartcontact\/.+\/estado\/tiempo_muestreo$/)) {
   const v = parseInt(raw) || 1;
   $('sampleRate').value = v;
-  log(`Sincronización: tiempo de muestreo -> ${v} s`, 'success');
+  log(`🛈 Actualización: Tiempo de muestreo -> ${v} s`, 'info');
   } 
 
   // ============================================================
-  // FLUJO D: Armónicos THD en vivo
+  // FLUJO D: Gráfica Armónicos THD
   // ============================================================
   else if (topic.match(/^smartcontact\/.+\/telemetria\/armonicos$/)) {
-    log(`← Armónicos THD: ${raw}`, 'data');
 
     try {
       const payload = JSON.parse(raw);
       processHarmonicsPayload(payload);
     } catch (e) {
-      log(`Error procesando armónicos: ${e.message}`, 'error');
+      log(`⚠ Error: [Adquisición] Gráfica (HARMONICS): ${e.message}`, 'error');
     }
   }
 
-  // FLUJO E: Forma de onda — manejado por _handleWaveformMessage antes de llegar aquí
-  // (el dispatch ocurre en client.onMessageArrived para evitar que Paho procese
-  //  el payload binario como UTF-8 y cierre la conexión)
+  // ============================================================
+  // FLUJO E: Gráfica Forma de onda
+  // ============================================================
   else if (topic.match(/^smartcontact\/.+\/telemetria\/waveform$/)) {
-    // No debería llegar aquí; _handleWaveformMessage lo intercepta antes.
-    log('Waveform llegó a onMessageArrived (inesperado).', 'warn');
   }
 }
 
@@ -1250,12 +1236,12 @@ function _handleWaveformMessage(message) {
       }
     }
   } catch (e) {
-    log(`Error leyendo buffer waveform: ${e.message}`, 'error');
+    log(`⚠ Error: [Adquisición] Gráfica (WAVEFORMS): ${e.message}`, 'error');
     return;
   }
 
   if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-    log('Forma de onda inválida: payload vacío.', 'error');
+    log(`⚠ Error: [Contenido] Gráfica (WAVEFORMS)`, 'error');
     return;
   }
 
@@ -1263,13 +1249,13 @@ function _handleWaveformMessage(message) {
     const chunk = parseWaveformChunk(arrayBuffer);
     handleWaveformChunk(chunk);
   } catch (e) {
-    log(`Error procesando chunk de forma de onda: ${e.message}`, 'error');
+    log(`⚠ Error: [Formato] Gráfica (WAVEFORMS): ${e.message}`, 'error');
   }
 }
 
 window.requestWaveform = function () {
   if (!client || !connected) {
-    log('No conectado. No se puede solicitar la gráfica de forma de onda.', 'error');
+    log('⚠ Error: No conectado. No se puede solicitar la gráfica (WAVEFORMS).', 'error');
     return;
   }
 
@@ -1279,24 +1265,12 @@ window.requestWaveform = function () {
   message.destinationName = WAVEFORM_REQUEST_TOPIC;
   client.send(message);
 
-  log(`→ Solicitud de gráfica enviada a "${WAVEFORM_REQUEST_TOPIC}"`, 'success');
+  log(`→ Solicitud de gráfica enviada (WAVEFORMS)`, 'success');
 
   const statusEl = $('waveformStatus');
   if (statusEl) {
     statusEl.textContent = 'Solicitud enviada...';
   }
-};
-
-window.requestDiagnosisWaveform = function () {
-  if (!client || !connected) return;
-
-  pendingWaveformMode = 'silent';
-
-  const message = new Paho.MQTT.Message('1');
-  message.destinationName = WAVEFORM_REQUEST_TOPIC;
-  client.send(message);
-
-  log('→ Solicitud de forma de onda enviada para diagnóstico', 'info');
 };
 
 window.requestAutoWaveform = function () {
@@ -1308,12 +1282,18 @@ window.requestAutoWaveform = function () {
   message.destinationName = WAVEFORM_REQUEST_TOPIC;
   client.send(message);
 
-  log('→ Solicitud de forma de onda enviada para gráfica y diagnóstico', 'info');
 };
+
+window.requestDiagnosisWaveform = function (auto = false) {
+  pendingWaveformMode = 'silent';
+
+  return publishControl('control/waveform/request', '1', auto);
+};
+
 
 window.requestHarmonics = function () {
   if (!client || !connected) {
-    log('No conectado. No se puede solicitar la gráfica de armónicos.', 'error');
+    log('⚠ Error: No conectado. No se puede solicitar la gráfica (HARMONICS).', 'error');
     return;
   }
 
@@ -1321,12 +1301,20 @@ window.requestHarmonics = function () {
   message.destinationName = HARMONICS_REQUEST_TOPIC;
   client.send(message);
 
-  log(`→ Solicitud de gráfica enviada a "${HARMONICS_REQUEST_TOPIC}"`, 'success');
+  log(`→ Solicitud de gráfica enviada (HARMONICS)`, 'success');
 
   const statusEl = $('harmonicLastUpdate');
   if (statusEl) {
     statusEl.textContent = 'Solicitud enviada...';
   }
+};
+
+window.requestAutoHarmonics = function () {
+  if (!client || !connected) return;
+
+  const message = new Paho.MQTT.Message('1');
+  message.destinationName = HARMONICS_REQUEST_TOPIC;
+  client.send(message);
 };
 
 function initWaveformChart() {
@@ -1545,8 +1533,6 @@ function handleWaveformChunk(chunk) {
     sequence.receivedCount++;
   }
 
-  log(`Chunk waveform recibido seq=${chunk.sequenceId} ${chunk.chunkIndex + 1}/${chunk.chunkCount}`, 'data');
-
   if (sequence.receivedCount === sequence.chunkCount) {
     renderWaveformSequence(sequence, pendingWaveformMode);
     waveformSequences.delete(chunk.sequenceId);
@@ -1646,23 +1632,27 @@ function renderWaveformSequence(sequence, mode = 'manual') {
   const voltagePoints = [];
   const currentPoints = [];
 
-  let sampleIndex = 0;
-  const dtMs = 1000.0 / sequence.sampleRateHz;
+  try {
+    let sampleIndex = 0;
+    const dtMs = 1000.0 / sequence.sampleRateHz;
 
-  for (let chunkIndex = 0; chunkIndex < sequence.chunkCount; chunkIndex++) {
-    const chunk = sequence.chunks[chunkIndex];
+    for (let chunkIndex = 0; chunkIndex < sequence.chunkCount; chunkIndex++) {
+      const chunk = sequence.chunks[chunkIndex];
 
-    if (!chunk) {
-      log(`No se puede renderizar seq=${sequence.sequenceId}; falta chunk ${chunkIndex}`, 'error');
-      return;
+      if (!chunk) {
+        throw new Error(`falta chunk ${chunkIndex} (seq=${sequence.sequenceId})`);
+      }
+
+      for (let i = 0; i < chunk.samplesInChunk; i++) {
+        const tMs = sampleIndex * dtMs;
+        voltagePoints.push({ x: tMs, y: chunk.voltage[i] });
+        currentPoints.push({ x: tMs, y: chunk.current[i] });
+        sampleIndex++;
+      }
     }
-
-    for (let i = 0; i < chunk.samplesInChunk; i++) {
-      const tMs = sampleIndex * dtMs;
-      voltagePoints.push({ x: tMs, y: chunk.voltage[i] });
-      currentPoints.push({ x: tMs, y: chunk.current[i] });
-      sampleIndex++;
-    }
+  } catch (e) {
+    log(`⚠ Error: [Procesamiento] Gráfica (WAVEFORMS): ${e.message}`, 'error');
+    return;
   }
 
   if (mode !== 'silent') {
@@ -1684,11 +1674,11 @@ function renderWaveformSequence(sequence, mode = 'manual') {
         `Captura completa · 60.00 Hz · Última actualización: ${new Date().toLocaleTimeString('es-MX')}`;
     }
 
-    log(`Waveform renderizado: ${sampleIndex} muestras · seq=${sequence.sequenceId}`, 'success');
+    log(`☑ Gráfica actualizada (WAVEFORMS).`, 'success');
   }
 
   if (mode !== 'manual') {
-    log(`Diagnóstico de carga ejecutado · seq=${sequence.sequenceId}`, 'info');
+    log(`🛈 Diagnóstico ejecutado`, 'success');
     analyzeLoadType(voltagePoints, currentPoints);
   }
 }
@@ -1714,29 +1704,22 @@ async function saveAlert(alertData) {
   renderPowerAlerts();
 
   try {
-    const { error } = await db
-      .from('alerts')
-      .insert(record);
+    const { error } = await db.from('alerts').insert(record);
 
     if (error) {
-      // Si la columna alert_time no existe en la tabla, reintentar sin ella
       if (error.message && error.message.includes('alert_time')) {
         const { error: error2 } = await db
           .from('alerts')
           .insert({ code: record.code, label: record.label, severity: record.severity, value: record.value });
-        if (error2) {
-          log(`Error guardando alerta DB: ${error2.message}`, 'error');
-          return;
-        }
+        if (error2) throw new Error(error2.message);
       } else {
-        log(`Error guardando alerta DB: ${error.message}`, 'error');
-        return;
+        throw new Error(error.message);
       }
     }
 
-    log(`⚠ Alerta guardada: ${record.label}`, record.severity === 'error' ? 'error' : 'warn');
+    log(`☑ Alerta guardada [ALERTS]: ${record.label}`, record.severity === 'error' ? 'error' : 'warn');
   } catch (e) {
-    log(`Error DB alerta: ${e.message}`, 'error');
+    log(`⚠ Error: guardando alerta [ALERTS]: ${e.message}`, 'error');
   }
 }
 
@@ -1781,14 +1764,12 @@ async function renderPowerAlerts() {
   const body = $('powerAlertsBody');
   if (!body) return;
 
-  // --- Paso 1: mostrar log local inmediatamente ---
-  // Esto garantiza visibilidad aunque la DB no esté disponible
   function renderFromLocal() {
     body.innerHTML = '';
     if (localAlertLog.length === 0) {
       const emptyLine = document.createElement('div');
-      emptyLine.className = 'log-line log-info';
-      emptyLine.textContent = 'No hay alertas registradas.';
+      emptyLine.className = 'log-line log-text';
+      emptyLine.textContent = '🛈 No hay alertas registradas [ALERTS]';
       body.appendChild(emptyLine);
       return;
     }
@@ -1802,7 +1783,6 @@ async function renderPowerAlerts() {
 
   renderFromLocal();
 
-  // --- Paso 2: intentar cargar historial persistente desde Supabase ---
   try {
     const { data, error } = await db
       .from('alerts')
@@ -1810,10 +1790,16 @@ async function renderPowerAlerts() {
       .order('created_at', { ascending: false })
       .limit(100);
 
-    if (error || !data || data.length === 0) return;
+    if (error) {
+      log(`⚠ Error: cargando historial [ALERTS]: ${error.message}`, 'error');
+      const errLine = document.createElement('div');
+      errLine.className = 'log-line log-error';
+      errLine.textContent = `⚠ Error: cargando historial [ALERTS]: ${error.message}`;
+      body.prepend(errLine);
+      return;
+    }
+    if (!data || data.length === 0) return;
 
-    // Combinar: DB como base histórica + entradas locales que no están en DB todavía
-    // Construir set de claves únicas de la DB para deduplicar
     const dbKeys = new Set(data.map(a => {
       const t = a.alert_time || new Date(a.created_at).toLocaleString('es-MX');
       return `${t}|${a.label}`;
@@ -1833,7 +1819,10 @@ async function renderPowerAlerts() {
     ];
 
     if (combined.length === 0) return;
-
+    if (!historyLoadLogged.alerts) {
+      log(`☑ Historial cargado [ALERTS] (${combined.length})`, 'success');
+      historyLoadLogged.alerts = true;
+    }
     body.innerHTML = '';
     combined.forEach(alert => {
       const line = document.createElement('div');
@@ -1843,13 +1832,11 @@ async function renderPowerAlerts() {
     });
 
   } catch (e) {
-    // Si falla la DB, el log local ya está visible — no sobreescribir
-    log(`Error leyendo historial de alertas DB: ${e.message}`, 'error');
+  log(`⚠ Error: Base de datos [ALERTS]: ${e.message}`, 'error');
   }
 }
 
 window.clearPowerAlerts = async function () {
-  // Limpiar también el log local en memoria
   localAlertLog.length = 0;
 
   const { error } = await db
@@ -1858,79 +1845,115 @@ window.clearPowerAlerts = async function () {
     .neq('id', 0);
 
   if (error) {
-    log(`Error limpiando alertas DB: ${error.message}`, 'error');
+    log(`⚠ Error: borrando historial [ALERTS]: ${error.message}`, 'error');
     return;
   }
 
   renderPowerAlerts();
-  log('Historial de alertas limpiado en Supabase.', 'warn');
+  log('⚠ Alerta: Historial borrado [ALERTS].', 'warn');
 };
 
-async function saveConsumptionPeriod() {
-  if (!periodStartTime) return;
+let isSavingPeriod = false;
 
+async function saveConsumptionPeriod() {
+  if (!periodStartTime || isSavingPeriod) return;
+  isSavingPeriod = true;
+
+  log('🛈 Sesión terminada.', 'error');
+
+  const closingStartTime   = periodStartTime;
+  const closingStartTimeMs = periodStartTimeMs;
   const periodEndTime = new Date().toLocaleString('es-MX');
   const consumedKwh = Math.max(0, kwhTotal - periodStartKwh);
 
+  periodStartTime = null;
+  periodStartTimeMs = null;
+  periodStartKwh = kwhTotal;
+
   try {
-    const { error } = await db
-      .from('consumption_periods')
-      .insert({
-        start_time: periodStartTime,
-        end_time: periodEndTime,
-        energy_kwh: Number(consumedKwh.toFixed(4))
-      });
+    const { error } = await db.from('consumption_periods').insert({
+      start_time: closingStartTime,
+      end_time: periodEndTime,
+      energy_kwh: Number(consumedKwh.toFixed(4))
+    });
 
     if (error) {
-      log(`Error guardando periodo DB: ${error.message}`, 'error');
+      log(`⚠ Error: guardando periodo [CONSUME]: ${error.message}`, 'error');
       return;
     }
-
-    log(`Periodo guardado en Supabase: ${consumedKwh.toFixed(4)} kWh`, 'success');
-
+    log(`☑ Periodo guardado [CONSUME]: ${consumedKwh.toFixed(4)} kWh`, 'success');
     renderConsumptionPeriods();
-
-    periodStartTime = null;
-    periodStartKwh = kwhTotal;
   } catch (e) {
-    log(`Error DB periodo: ${e.message}`, 'error');
+    log(`⚠ Error: Base de datos [CONSUME]: ${e.message}`, 'error');
+  } finally {
+    isSavingPeriod = false;
   }
 }
+
+let liveConsumptionPeriodEl = null;
 
 async function renderConsumptionPeriods() {
   const body = $('consumptionPeriodsBody');
   if (!body) return;
 
-  body.innerHTML = '';
+  liveConsumptionPeriodEl = null;
 
   const { data, error } = await db
     .from('consumption_periods')
     .select('start_time, end_time, energy_kwh')
     .order('created_at', { ascending: false })
-    .limit(20);
+    .limit(100);
 
   if (error) {
+    log(`⚠ Error: cargando historial [CONSUME]: ${error.message}`, 'error');
+    body.innerHTML = '';
     const line = document.createElement('div');
     line.className = 'log-line log-error';
-    line.textContent = `Error leyendo periodos.: ${error.message}`;
+    line.textContent = `⚠ Error: cargando historial [CONSUME]: ${error.message}`;
     body.appendChild(line);
     return;
   }
 
-  if (!data || data.length === 0) {
+  body.innerHTML = '';
+
+  if (periodStartTime && periodStartTimeMs) {
+    const line = document.createElement('div');
+    line.className = 'log-line log-live';
+    body.appendChild(line);
+    liveConsumptionPeriodEl = line;
+    updateLiveConsumptionPeriodLine();
+  } else {
+    const noActiveLine = document.createElement('div');
+    noActiveLine.className = 'log-line log-text';
+    noActiveLine.textContent = '🛈 No hay periodo activo.';
+    body.appendChild(noActiveLine);
+  }
+
+  if ((!data || data.length === 0) && !liveConsumptionPeriodEl) {
     const emptyLine = document.createElement('div');
-    emptyLine.className = 'log-line log-info';
-    emptyLine.textContent = 'No hay periodos registrados.';
+    emptyLine.className = 'log-line log-text';
+    emptyLine.textContent = '🛈 No hay periodos registrados [CONSUME]';
     body.appendChild(emptyLine);
     return;
   }
 
-  data.forEach(period => {
+  if (!historyLoadLogged.consume) {
+    log(`☑ Historial cargado [CONSUME] (${(data || []).length})`, 'success');
+    historyLoadLogged.consume = true;
+  }
+  (data || []).forEach(period => {
     const line = document.createElement('div');
     line.className = 'log-line log-energy';
     line.textContent = `[${period.start_time}] → [${period.end_time}] | ${Number(period.energy_kwh).toFixed(4)} kWh`;
     body.appendChild(line);
   });
+}
+
+function updateLiveConsumptionPeriodLine() {   // ← función nueva
+  if (!liveConsumptionPeriodEl || !periodStartTime || !periodStartTimeMs) return;
+  const consumedKwh = Math.max(0, kwhTotal - periodStartKwh);
+  liveConsumptionPeriodEl.textContent =
+    `[${periodStartTime}] → [En curso] | ${consumedKwh.toFixed(4)} kWh`;
 }
 
 window.clearConsumptionPeriods = async function () {
@@ -1940,12 +1963,12 @@ window.clearConsumptionPeriods = async function () {
     .neq('id', 0);
 
   if (error) {
-    log(`Error limpiando periodos DB: ${error.message}`, 'error');
+    log(`⚠ Error: borrando historial [CONSUME]: ${error.message}`, 'error');
     return;
   }
 
   renderConsumptionPeriods();
-  log('Historial de periodos limpiado en Supabase.', 'warn');
+  log('⚠ Alerta: Historial borrado [CONSUME].', 'warn');
 };
 
 async function saveConnectionEvent(deviceId, state) {
@@ -1958,13 +1981,13 @@ async function saveConnectionEvent(deviceId, state) {
   try {
     const { error } = await db.from('connection_history').insert(record);
     if (error) {
-      log(`Error guardando historial de conexión: ${error.message}`, 'error');
+      log(`⚠ Error: guardando periodo [CONNECT]: ${error.message}`, 'error');
       return;
     }
-    log(`${state === 'online' ? '🟢' : '🔴'} ${deviceId}: ${state}`, state === 'online' ? 'info' : 'warn');
+    log(`☑ Periodo guardado [CONNECT]: ${deviceId} -> ${state}`, 'success');
     renderConnectionPeriods();
   } catch (e) {
-    log(`Error DB conexión: ${e.message}`, 'error');
+    log(`⚠ Error: Base de datos [CONNECT]: ${e.message}`, 'error');
   }
 }
 
@@ -1976,10 +1999,14 @@ async function fetchConnectionHistoryFromDatabase(limit = 300) {
     .limit(limit);
 
   if (error) {
-    log(`Error leyendo historial de conexión DB: ${error.message}`, 'error');
-    return [];
+    log(`⚠ Error: cargando historial [CONNECT]: ${error.message}`, 'error');
+    return { error: error.message };
   }
-  return (data || []).reverse(); // volver a orden cronológico ascendente
+  if (!historyLoadLogged.connect) {
+    log(`☑ Historial cargado [CONNECT] (${(data || []).length})`, 'success');
+    historyLoadLogged.connect = true;
+  }
+  return (data || []).reverse(); 
 }
 
 function buildConnectionPeriods(events) {
@@ -2022,14 +2049,34 @@ async function renderConnectionPeriods() {
   if (!body) return;
 
   const events = await fetchConnectionHistoryFromDatabase();
-  const periods = buildConnectionPeriods(events);
+
+  if (events && events.error) {
+    body.innerHTML = '';
+    const line = document.createElement('div');
+    line.className = 'log-line log-error';
+    line.textContent = `⚠ Error: cargando historial [CONNECT]: ${events.error}`;
+    body.appendChild(line);
+    return;
+  }
+
+  const periods = buildConnectionPeriods(events).slice(0, 100);
 
   body.innerHTML = '';
+  liveConnectionPeriodEl = null;      
+  liveConnectionPeriodStart = null;
+
+  const hasActive = periods.some(p => !p.end);
+  if (!hasActive) {
+    const noActiveLine = document.createElement('div');
+    noActiveLine.className = 'log-line log-text';
+    noActiveLine.textContent = '🛈 No hay periodo activo.';
+    body.appendChild(noActiveLine);
+  }
 
   if (periods.length === 0) {
     const emptyLine = document.createElement('div');
-    emptyLine.className = 'log-line log-info';
-    emptyLine.textContent = 'No hay periodos registrados.';
+    emptyLine.className = 'log-line log-text';
+    emptyLine.textContent = '🛈 No hay periodos registrados [CONNECT]';
     body.appendChild(emptyLine);
     return;
   }
@@ -2041,9 +2088,15 @@ async function renderConnectionPeriods() {
     const label = getDeviceDisplayName(p.deviceId);
 
     const line = document.createElement('div');
-    line.className = p.end ? 'log-line log-connect' : 'log-line log-success';
+    line.className = p.end ? 'log-line log-connect' : 'log-line log-live';
     line.textContent = `[${startStr}] → [${endStr}] | ${formatDurationMs(durationMs)}`;
     body.appendChild(line);
+
+    if (!p.end) {                     
+      liveConnectionPeriodEl = line;
+      liveConnectionPeriodStart = p.start;
+    }
+
   });
 }
 
@@ -2054,12 +2107,12 @@ window.clearConnectionHistory = async function () {
     .neq('id', 0);
 
   if (error) {
-    log(`Error limpiando historial de conexión DB: ${error.message}`, 'error');
+    log(`⚠ Error: borrando historial [CONNECT]: ${error.message}`, 'error');
     return;
   }
 
   renderConnectionPeriods();
-  log('Historial de periodos de conexión limpiado en Supabase.', 'warn');
+  log('⚠ Alerta: Historial borrado [CONNECT].', 'warn');
 };
 
 // ------------------------------------------------------------------
@@ -2211,7 +2264,7 @@ function processHarmonicsPayload(payload) {
   const harmonics = payload.current_harmonics || payload.harmonics || payload.armonicos || [];
 
   if (!Array.isArray(harmonics)) {
-    log('Formato de armónicos inválido: no contiene arreglo de armónicos.', 'error');
+    log(`⚠ Error: [Contenido] Gráfica (HARMONICS)`, 'error');
     return;
   }
 
@@ -2231,26 +2284,34 @@ function processHarmonicsPayload(payload) {
     };
   });
 
-  if (normalized.some(item => !Number.isFinite(item.percent))) {
-    log('Armónicos inválidos: el porcentaje debe ser numérico.', 'error');
+  try {
+    if (normalized.some(item => !Number.isFinite(item.percent))) {
+      throw new Error('el porcentaje debe ser numérico');
+    }
+  } catch (e) {
+    log(`⚠ Error: [Formato] Gráfica (HARMONICS): ${e.message}`, 'error');
     return;
   }
 
   const thd = Number(payload.thd ?? payload.current_thd_percent ?? 0);
   const fundamental = Number(payload.fundamental_hz ?? payload.fundamentalHz ?? 60);
 
-  lastHarmonicThd = Number.isFinite(thd) && thd > 0 ? thd : null;
+  try {
+    lastHarmonicThd = Number.isFinite(thd) && thd > 0 ? thd : null;
 
-  updateHarmonicChart(normalized.map(item => item.percent));
+    updateHarmonicChart(normalized.map(item => item.percent));
 
-  const lastUpdateEl = $('harmonicLastUpdate');
-  if (lastUpdateEl) {
-    const freqText = Number.isFinite(fundamental) && fundamental > 0 ? fundamental.toFixed(2) : '60.00';
-    lastUpdateEl.textContent =
-      `Captura completa · ${freqText} Hz · Última actualización: ${new Date().toLocaleTimeString('es-MX')}`;
+    const lastUpdateEl = $('harmonicLastUpdate');
+    if (lastUpdateEl) {
+      const freqText = Number.isFinite(fundamental) && fundamental > 0 ? fundamental.toFixed(2) : '60.00';
+      lastUpdateEl.textContent =
+        `Captura completa · ${freqText} Hz · Última actualización: ${new Date().toLocaleTimeString('es-MX')}`;
+    }
+
+    log(`☑ Gráfica actualizada (HARMONICS).`, 'success');
+  } catch (e) {
+    log(`⚠ Error: [Procesamiento] Gráfica (HARMONICS): ${e.message}`, 'error');
   }
-
-  log(`Armónicos actualizados: ${normalized.length} valores`, 'success');
 }
 
 function updateHarmonicChart(harmonics) {
@@ -2345,8 +2406,6 @@ async function updateEnergyCost() {
   let offset = 0;
 
   try {
-    // Siempre traemos el bimestre COMPLETO paginado, sin importar qué periodo esté
-    // seleccionado, porque necesitamos saber en qué bloque de tarifa vas acumulado.
     while (true) {
       const { data, error } = await db
         .from('consumption_points')
@@ -2356,7 +2415,6 @@ async function updateEnergyCost() {
         .range(offset, offset + pageSize - 1);
 
       if (error) {
-        log(`Error leyendo consumo bimestral DB: ${error.message}`, 'error');
         return;
       }
 
@@ -2421,7 +2479,7 @@ async function updateEnergyCost() {
       }
     }
   } catch (e) {
-    log(`Error DB consumo bimestral: ${e.message}`, 'error');
+    log(`⚠ Error: Cálculo de consumo: ${e.message}`, 'error');
   }
 }
 
@@ -2754,7 +2812,7 @@ async function fetchPowerHistoryFromDatabase(range, rangeOffset = 0) {
       .range(dbOffset, dbOffset + pageSize - 1);
 
     if (error) {
-      log(`Error leyendo potencia DB: ${error.message}`, 'error');
+      log(`⚠ Error: Gráfica (POWER): ${error.message}`, 'error');
       break;
     }
 
@@ -2993,7 +3051,7 @@ async function fetchConsumptionHistoryFromDatabase(range, rangeOffset = 0) {
       .range(dbOffset, dbOffset + pageSize - 1);
 
     if (error) {
-      log(`Error leyendo consumo DB: ${error.message}`, 'error');
+      log(`⚠ Error: Gráfica (ENERGY): ${error.message}`, 'error');
       break;
     }
 
@@ -3285,41 +3343,32 @@ function updateThdBars(thd) {
 let kwhSampleMs = 1000;   // Intervalo de muestreo actual en ms (se actualiza con sendSampleRate)
 
 function startKwhTimer() {
-  if (kwhTimerInterval) {
-    clearInterval(kwhTimerInterval);
+  if (!kwhTimerInterval) {
+    _scheduleKwhTick();
   }
-
-  kwhStartTime = Date.now();
-  periodStartTime = new Date().toLocaleString('es-MX');
-  periodStartKwh = kwhTotal;
-
-  _scheduleKwhTick();
 }
 
 function _scheduleKwhTick() {
   if (kwhTimerInterval) clearInterval(kwhTimerInterval);
 
   kwhTimerInterval = setInterval(() => {
-    // Acumular energía proporcional al intervalo real (no siempre 1 s)
     const deltaKwh = (lastPowerW * kwhSampleMs) / 3_600_000_000;
-
     kwhTotal += deltaKwh;
 
     $('kwh-session').textContent = kwhTotal.toFixed(4) + ' kWh';
     const _kwhPow2 = $('kwh-power'); if (_kwhPow2) _kwhPow2.textContent = lastPowerW.toFixed(1) + ' W';
 
-    // Actualizar costo de sesión en pesos
     const sessionCost = calculateTieredEnergyCost(kwhTotal);
     const costSessionEl = $('cost-session');
     if (costSessionEl) costSessionEl.textContent = '$' + sessionCost.totalCost.toFixed(4) + ' MXN';
-
-    const elapsed = Math.floor((Date.now() - kwhStartTime) / 1000);
-    const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
-    const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
-    const s = String(elapsed % 60).padStart(2, '0');
-
-    $('kwh-time').textContent = `${h}:${m}:${s}`;
   }, kwhSampleMs);
+}
+
+function updateSessionTimerDisplay() {  
+  const el = $('kwh-time');
+  if (!el) return;
+  if (!periodStartTimeMs) { el.textContent = '00:00:00'; return; }
+  el.textContent = formatDurationMs(Date.now() - periodStartTimeMs);
 }
 
 // Llamar esto cuando el usuario cambia el tiempo de muestreo
@@ -3331,7 +3380,7 @@ function applySampleRate(segundos) {
   // Reiniciar el timer con el nuevo intervalo si ya está corriendo
   if (kwhTimerInterval) {
     _scheduleKwhTick();
-    log(`Frecuencia de actualización ajustada a ${s} s`, 'info');
+    log(`🛈 Frecuencia de actualización ajustada a ${s} s`, 'info');
   }
 
   // El watchdog dinámico se actualiza automáticamente en el siguiente mensaje
@@ -3339,34 +3388,16 @@ function applySampleRate(segundos) {
 }
 
 window.resetKwh = function () {
-  // Antes de resetear, guardar el periodo actual
-  if (periodStartTime && kwhTotal > periodStartKwh) {
-    saveConsumptionPeriod();
+  if (publishControl('control/reset_sesion', '1')) {
+    log('⚠ Alerta: Sesión reseteada.', 'warn');
   }
-
-  // Avisar al ESP32 para que cierre la sesión actual y abra una nueva
-  publishToAllDevices('control/reset_sesion', '1');
-
-  // Reiniciar contador de energía
-  kwhTotal = 0;
-  kwhStartTime = Date.now();
-
-  $('kwh-session').textContent = '0.0000 kWh';
-  const _kwhPow3 = $('kwh-power'); if (_kwhPow3) _kwhPow3.textContent = lastPowerW.toFixed(1) + ' W';
-  $('kwh-time').textContent = '00:00:00';
-  updateEnergyCost();
-
-  // Iniciar nuevo periodo después del reset
-  periodStartTime = new Date().toLocaleString('es-MX');
-  periodStartKwh = kwhTotal;
-
-  log('Contador kWh reseteado y periodo guardado.', 'warn');
 };
 
 window.resetDiagnosis = function () {
-  showDiagnosisPlaceholder('Solicitando nueva captura...');
-  log('Diagnóstico de carga reseteado.', 'warn');
-  requestDiagnosisWaveform();
+  if (requestDiagnosisWaveform()) {
+    showDiagnosisPlaceholder('Solicitando nueva captura...');
+    log('⚠ Alerta: Diagnóstico reseteado.', 'warn');
+  }
 };
 
 function showDiagnosisPlaceholder(hintMessage) {
@@ -3403,15 +3434,16 @@ function clearWaveformAndHarmonicsCharts() {
   if (harmonicLastUpdateEl) harmonicLastUpdateEl.textContent = 'Última actualización: --:--:--';
 }
 
+
 // ------------------------------------------------------------------
 // Comandos del dispositivo
 // ------------------------------------------------------------------
 
-// Límite superior de potencia — sincronizar slider ↔ input (con validación cruzada)
+// Límite superior de potencia
 window.syncPowerLimit = function (val) {
   let v = parseInt(val);
   const minVal = parseInt($('powerLimitMin').value) || 0;
-  if (v < minVal) v = minVal; // el superior no puede bajar del inferior
+  if (v < minVal) v = minVal; 
   $('powerLimit').value       = v;
   $('powerLimitSlider').value = v;
 };
@@ -3427,11 +3459,11 @@ window.updatePowerLimitDisplay = function () {
   $('powerLimitSlider').value = Math.min(1200, v);
 };
 
-// Límite inferior de potencia — sincronizar slider ↔ input (con validación cruzada)
+// Límite inferior de potencia
 window.syncPowerLimitMin = function (val) {
   let v = parseInt(val);
   const maxVal = parseInt($('powerLimit').value) || 1200;
-  if (v > maxVal) v = maxVal; // el inferior no puede pasar del superior
+  if (v > maxVal) v = maxVal; 
   $('powerLimitMin').value       = v;
   $('powerLimitMinSlider').value = v;
 };
@@ -3447,7 +3479,7 @@ window.updatePowerLimitMinDisplay = function () {
   $('powerLimitMinSlider').value = Math.min(1200, v);
 };
 
-// Tiempo de muestreo — sincronizar slider ↔ input
+// Tiempo de muestreo
 window.syncSampleRate = function (val) {
   $('sampleRate').value = val;
 };
@@ -3459,10 +3491,48 @@ window.updateSampleDisplay = function () {
   $('sampleSlider').value = Math.min(60, v);
 };
 
+// ------------------------------------------------------------------
+// Funciones para enviar comandos 
+// ------------------------------------------------------------------
+
+// 1. Comando de Control de Relé
+window.toggleRelay = function () {
+  const payload = relayOn ? 'OFF' : 'ON';
+  publishControl('control/rele', payload);
+};
+
+// 2. Comando de Control de Carga
+window.sendNoLoadAction = function (value) {
+  const label = value === 'OFF' ? 'Desconectar salida sin carga' : 'Mantener salida sin carga';
+  publishControl('control/no_load_action', value);
+};
+
+// 3. Comando de Límite Superior de Potencia
+window.sendPowerLimit = function () {
+  const rawValue = $('powerLimitSlider').value;
+  const limitValue = String(rawValue).padStart(4, '0');
+  publishControl('control/limite_potencia', limitValue);
+};
+
+// 4. Comando de Límite Inferior de Potencia
+window.sendPowerLimitMin = function () {
+  const rawValue = $('powerLimitMinSlider').value;
+  const limitValue = String(rawValue).padStart(4, '0');
+  publishControl('control/limite_potencia_min', limitValue);
+};
+
+// 5. Comando de Tiempo de Muestreo
+window.sendSampleRate = function () {
+  const sampleValue = $('sampleRate').value;
+  publishControl('control/tiempo_muestreo', sampleValue);
+  applySampleRate(sampleValue);
+};
+
 
 // ------------------------------------------------------------------
 // Estado de conexión
 // ------------------------------------------------------------------
+
 function setStatus(isConnected) {
   const dot  = $('statusDot');
   const text = $('statusText');
@@ -3478,6 +3548,7 @@ function setStatus(isConnected) {
 // ------------------------------------------------------------------
 // Log de consola
 // ------------------------------------------------------------------
+
 function log(msg, type = 'info') {
   const body = $('logBody');
   const ts   = new Date().toLocaleTimeString('es-MX');
@@ -3491,18 +3562,19 @@ function log(msg, type = 'info') {
 
 window.clearLog = function () {
   $('logBody').innerHTML = '';
-  log('Log limpiado.', 'info');
+  log('🛈 Log borrado.', 'info');
 };
 
 // ------------------------------------------------------------------
 // Simulador (consola del navegador: startSim() / stopSim())
 // ------------------------------------------------------------------
+
 let simInterval = null;
 
 window.startSim = function (intervalMs = 1000) {
   stopSim();
-  if (!kwhStartTime) startKwhTimer();
-  log('▸ Simulador iniciado (sin broker).', 'warn');
+  startKwhTimer();
+  log('▸ Simulador iniciado.', 'success');
   simInterval = setInterval(() => {
     const v   = +(120 + Math.random() * 10 - 5).toFixed(1);
     const i   = +(2  + Math.random() * 0.5).toFixed(2);
@@ -3523,69 +3595,13 @@ window.stopSim = function () {
   if (simInterval) {
     clearInterval(simInterval);
     simInterval = null;
-    log('■ Simulador detenido.', 'warn');
+    log('■ Simulador detenido.', 'error');
   }
 };
-// ============================================================
-// FUNCIONES PARA ENVIAR COMANDOS (PUBLICAR EN MQTT)
-// ============================================================
 
-// Función genérica para enviar mensajes fácilmente
-function publishMessage(topic, payload) {
-  if (connected && client) {
-    // Paho MQTT requiere crear un objeto Message
-    const message = new Paho.MQTT.Message(payload.toString());
-    message.destinationName = topic;
-    client.send(message);
-  } else {
-    log('Error: No se puede enviar comando, el broker está desconectado.', 'error');
-  }
-}
 
-window.toggleRelay = function () {
-  // Evaluamos cómo creemos que está el relé para pedir lo contrario
-  const payload = relayOn ? 'OFF' : 'ON';
-  const topic = 'smartcontact/contacto_01/control/rele';
 
-  // Mandamos la orden al hardware
-  publishMessage(topic, payload);
-  log(`▸ Comando enviado: Relé -> ${payload} (Esperando confirmación física...)`, 'info');
 
-};
-
-// 2. Comando de Límite de Potencia
-window.sendPowerLimit = function () {
-  const rawValue = $('powerLimitSlider').value;
-  const limitValue = String(rawValue).padStart(4, '0');
-  log(`Dispositivos conocidos: [${[...knownDevices].join(', ')}]`, 'info');
-  publishToAllDevices('control/limite_potencia', limitValue);
-};
-
-// 2b. Comando de Límite Inferior de Potencia
-window.sendPowerLimitMin = function () {
-  const rawValue = $('powerLimitMinSlider').value;
-  const limitValue = String(rawValue).padStart(4, '0');
-  log(`Dispositivos conocidos: [${[...knownDevices].join(', ')}]`, 'info');
-  publishToAllDevices('control/limite_potencia_min', limitValue);
-};
-
-// 3. Comando de Tiempo de Muestreo
-window.sendSampleRate = function () {
-  const sampleValue = $('sampleRate').value;
-  log(`Dispositivos conocidos: [${[...knownDevices].join(', ')}]`, 'info');
-  publishToAllDevices('control/tiempo_muestreo', sampleValue);
-  applySampleRate(sampleValue);
-};
-
-// 4. Comando de comportamiento sin carga
-// Control path: control/no_load_action
-// Payload: "OFF"  → desconectar salida automáticamente cuando no hay corriente
-//          "KEEP" → mantener salida encendida aunque no haya corriente
-window.sendNoLoadAction = function (value) {
-  const label = value === 'OFF' ? 'Desconectar salida sin carga' : 'Mantener salida sin carga';
-  publishToAllDevices('control/no_load_action', value);
-  log(`  (${label})`, 'info');
-};
 
 window.addEventListener('DOMContentLoaded', () => {
 
@@ -3622,8 +3638,5 @@ window.addEventListener('DOMContentLoaded', () => {
   renderPowerAlerts();
   renderConsumptionPeriods();
 
-  if (relayOn && !periodStartTime) {
-    periodStartTime = new Date().toLocaleString('es-MX');
-    periodStartKwh = kwhTotal;
-  }
+  updateSessionTimerDisplay(); 
 });
