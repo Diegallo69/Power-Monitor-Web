@@ -2,51 +2,16 @@
    Smart Energy Contact — app.js
    ============================================================ */
 
+
 // ------------------------------------------------------------------
-// Estado global
+// Configuración y constantes
 // ------------------------------------------------------------------
-let client    = null;
-let connected = false;
-let relayOn   = null; // Estado real desconocido hasta recibir confirmación del hardware
-let powerChartRange = 'hour';
-let consumptionChartRange = 'day';
-let powerChartRangeOffset = 0;
-let consumptionChartRangeOffset = 0;
-
-let trianglePa  = 0;
-let trianglePap = 0;
-let trianglePr  = 0;
-
-let powerChart = null;
-const powerChartLabels = new Array(60).fill('');
-const powerChartData   = new Array(60).fill(null);
-let powerChartFillCount = 0; // cuántos puntos reales han llegado desde que arrancó
-
-let consumptionChart = null;
-const consumptionChartLabels = [];
-const consumptionChartData = [];
-
-let pendingWaveformMode = 'manual'; // 'manual' | 'silent' | 'auto'
-
-let latestAlertTimeout = null;
-let lastDisplayedFaultFlags = 0;
-
-// Registro local de alertas en memoria (respaldo si Supabase no está disponible)
-// Cada entrada: { time: string, label: string, severity: string }
-const localAlertLog = [];
-
-let harmonicChart = null;
-const harmonicChartLabels = [];
-const harmonicChartData = [];
-let lastHarmonicThd = null;
-let waveformChart = null;
 
 const HARMONICS_REQUEST_TOPIC = 'smartcontact/contacto_01/control/armonicos/request';
 const HARMONICS_COUNT = 20;
 
 const WAVEFORM_REQUEST_TOPIC = 'smartcontact/contacto_01/control/waveform/request';
 
-// Formato binario de forma de onda
 const WAVEFORM_HEADER_SIZE = 24;
 const WAVEFORM_CHANNELS_EXPECTED = 2;
 const WAVEFORM_FORMAT_I16_SCALED = 1;
@@ -61,25 +26,47 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-async function testDatabaseConnection() {
-  try {
-    const { data, error } = await db
-      .from('telemetry')
-      .select('id, created_at')
-      .limit(1);
+const LIMITS = { v: 250, i: 10 };
 
-    if (error) throw new Error(error.message);
-      
-    log('☑ Conectado a base de datos', 'success');
-  } catch (e) {
-    log(`⚠ Error: Conectado a base de datos: ${e.message}`, 'error');
-  }
-}
+const rootStyles = getComputedStyle(document.documentElement);
 
+// Estado global
+let client    = null;
+let connected = false;
+let relayOn   = null; 
+let powerChartRange = 'hour';
+let consumptionChartRange = 'day';
+let powerChartRangeOffset = 0;
+let consumptionChartRangeOffset = 0;
 
-// Acumulador de energía (kWh)
-let kwhTotal      = 0;       // kWh acumulados en sesión
-let lastPowerW    = 0;       // última potencia activa recibida (W)
+let trianglePa  = 0;
+let trianglePap = 0;
+let trianglePr  = 0;
+
+let powerChart = null;
+const powerChartLabels = new Array(60).fill('');
+const powerChartData   = new Array(60).fill(null);
+let powerChartFillCount = 0; 
+
+let consumptionChart = null;
+const consumptionChartLabels = [];
+const consumptionChartData = [];
+
+let pendingWaveformMode = 'manual'; 
+
+let latestAlertTimeout = null;
+let lastDisplayedFaultFlags = 0;
+
+const localAlertLog = [];
+
+let harmonicChart = null;
+const harmonicChartLabels = [];
+const harmonicChartData = [];
+let lastHarmonicThd = null;
+let waveformChart = null;
+
+let kwhTotal      = 0;       
+let lastPowerW    = 0;       
 let kwhTimerInterval = null;
 let lastFaultFlags = 0;
 let lastAlertsActiveMask = 0;
@@ -90,12 +77,58 @@ let periodStartTime = null;
 let periodStartKwh = 0;
 let periodStartTimeMs = null; 
 
-// Límites para las barras de progreso
-const LIMITS = { v: 250, i: 10 };
+// Referencias y utilidades básicas
+const $ = id => document.getElementById(id);
+
+const els = {
+  v:   $('val-v'),
+  i:   $('val-i'),
+  pa:  $('val-pa'),
+  pap: $('val-pap'),
+  pr:  $('val-pr'),
+  fp:  $('val-fp'),
+  thd: $('val-thd'),
+  kwh: $('val-kwh'),
+};
+
+function log(msg, type = 'info') {
+  const body = $('logBody');
+  const ts   = new Date().toLocaleTimeString('es-MX');
+  const line = document.createElement('div');
+  line.className = `log-line log-${type}`;
+  line.textContent = `[${ts}] ${msg}`;
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
+  while (body.children.length > 100) body.removeChild(body.firstChild);
+}
+
+window.clearLog = function () {
+  $('logBody').innerHTML = '';
+  log('🛈 Log borrado.', 'info');
+};
+
+function hexToRgba(hex, alpha) {
+  const h = hex.trim().replace('#', '');
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function blendHexOverBg(hex, alpha, bgHex = '#050505') {
+  const c  = hex.trim().replace('#', '');
+  const bg = bgHex.replace('#', '');
+  const r = parseInt(c.substring(0, 2), 16), g = parseInt(c.substring(2, 4), 16), b = parseInt(c.substring(4, 6), 16);
+  const br = parseInt(bg.substring(0, 2), 16), bgn = parseInt(bg.substring(2, 4), 16), bb = parseInt(bg.substring(4, 6), 16);
+  const rr = Math.round(alpha * r + (1 - alpha) * br);
+  const rg = Math.round(alpha * g + (1 - alpha) * bgn);
+  const rb = Math.round(alpha * b + (1 - alpha) * bb);
+  return `rgb(${rr}, ${rg}, ${rb})`;
+}
+
 
 // ------------------------------------------------------------------
-// Registro dinámico de dispositivos detectados
-// Así publishToAllDevices() sabe a cuántos y cuáles enviar.
+// CONEXIÓN DISPOSITIVOS
 // ------------------------------------------------------------------
 const knownDevices = new Set(['contacto_01']);
 let activeDeviceId = 'contacto_01';
@@ -119,635 +152,21 @@ function registerDeviceFromTopic(topic) {
   }
 }
 
-let historyLoadLogged = { alerts: false, consume: false, connect: false };
-
-const CONTROL_LABELS = {
-  'control/rele':               'Control de relé',
-  'control/no_load_action':     'Control de carga',
-  'control/limite_potencia':    'Limite superior de potencia',
-  'control/limite_potencia_min':'Limite inferior de potencia',
-  'control/tiempo_muestreo':    'Tiempo de muestreo',
-  'control/reset_sesion':       'Reinicio de sesión',
-  'control/waveform/request':   'Reinicio de diagnóstico',
-  'control/ack_advertencia':    'Confirmación de advertencia'
-};
-
-function publishControl(controlPath, payload, silent = false) {
-  const label = CONTROL_LABELS[controlPath] || controlPath;
-  if (!connected || !client) {
-    if (!silent) log(`⚠ Error: No conectado. No se puede enviar comando: ${label}`, 'error');
-    return false;
-  }
-  const topic = `smartcontact/${activeDeviceId}/${controlPath}`;
-  try {
-    const msg = new Paho.MQTT.Message(payload.toString());
-    msg.destinationName = topic;
-    client.send(msg);
-    if (!silent) log(`→ Comando enviado: ${label} -> ${payload}`, 'success');
-    return true;
-  } catch (e) {
-    if (!silent) log(`⚠ Error: Enviando comando ${label}: ${e.message}`, 'error');
-    return false;
-  }
-}
-
-const FAULTS = {
-  FAULT_OVERVOLTAGE: {
-    bit: 1,
-    label: 'Alto voltaje',
-    severity: 'warn'
-  },
-  FAULT_UNDERVOLTAGE: {
-    bit: 2,
-    label: 'Bajo voltaje',
-    severity: 'warn'
-  },
-  FAULT_OVERCURRENT: {
-    bit: 3,
-    label: 'Alta corriente',
-    severity: 'error'
-  },
-  FAULT_UNDERCURRENT: {
-    bit: 4,
-    label: 'Baja corriente',
-    severity: 'error'
-  },
-  FAULT_OVERPOWER: {
-    bit: 5,
-    label: 'Sobrecarga de potencia',
-    severity: 'error'
-  },
-  FAULT_UNDERPOWER: {
-    bit: 6,
-    label: 'Subcarga de potencia',
-    severity: 'error'
-  },
-  FAULT_HIGH_POWER: {
-    bit: 7,
-    label: 'Potencia acercándose al límite superior',
-    severity: 'warn'
-  },
-  FAULT_LOW_POWER: {
-    bit: 8,
-    label: 'Potencia acercándose al límite inferior',
-    severity: 'warn'
-  },
-  FAULT_CURRENT_RELAY_CLOSED: {
-    bit: 9,
-    label: 'Corriente no detectada con relé cerrado',
-    severity: 'warn'
-  },
-  FAULT_CURRENT_RELAY_OPEN: {
-    bit: 10,
-    label: 'Corriente detectada con relé abierto',
-    severity: 'warn'
-  },
-  FAULT_RELAY_FAILED_TO_OPEN: {
-    bit: 12,
-    label: 'Falla en abrir el relé',
-    severity: 'error'
-  },
-   FAULT_SENSOR_ADC_DISCONNECTED: {
-    bit: 13,
-    label: 'Sensor ADC desconectado (sin señal)',
-    severity: 'error'
-  },
-  FAULT_SENSOR_ZCM_DISCONNECTED: {
-    bit: 14,
-    label: 'Sensor ZCM desconectado (sin señal)',
-    severity: 'error'
-  },
-  FAULT_SENSOR_ADC_INVALID: {
-    bit: 15,
-    label: 'Señal de sensor ADC inválida',
-    severity: 'error'
-  },
-  FAULT_SENSOR_ZCM_INVALID: {
-    bit: 16,
-    label: 'Señal de sensor ZCM inválida',
-    severity: 'error'
-  },
-  FAULT_FREQUENCY_OUT_OF_RANGE: {
-    bit: 17,
-    label: 'Frecuencia de línea fuera de rango',
-    severity: 'warn'
-  }
-};
-
-const CFE_TARIFFS = {
-  '1': {
-    name: 'CFE Tarifa 1',
-    seasonStartMonth: 5, seasonEndMonth: 10,
-    verano: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.125 },
-      { label: 'Intermedio', limitKwh: 65, price: 1.369 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
-    ]},
-    invierno: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.148 },
-      { label: 'Intermedio', limitKwh: 65, price: 1.393 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
-    ]},
-    dacLimitKwhPerMonth: 250
-  },
-  '1A': {
-    name: 'CFE Tarifa 1A',
-    seasonStartMonth: 5, seasonEndMonth: 10,
-    verano: { blocks: [
-      { label: 'Básico', limitKwh: 100, price: 1.007 },
-      { label: 'Intermedio', limitKwh: 50, price: 1.167 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
-    ]},
-    invierno: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.148 },
-      { label: 'Intermedio', limitKwh: 75, price: 1.393 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
-    ]},
-    dacLimitKwhPerMonth: 300
-  },
-  '1B': {
-    name: 'CFE Tarifa 1B',
-    seasonStartMonth: 5, seasonEndMonth: 10,
-    verano: { blocks: [
-      { label: 'Básico', limitKwh: 125, price: 1.007 },
-      { label: 'Intermedio', limitKwh: 100, price: 1.167 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
-    ]},
-    invierno: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.148 },
-      { label: 'Intermedio', limitKwh: 100, price: 1.393 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
-    ]},
-    dacLimitKwhPerMonth: 400
-  },
-  '1C': {
-    name: 'CFE Tarifa 1C',
-    seasonStartMonth: 5, seasonEndMonth: 10,
-    verano: { blocks: [
-      { label: 'Básico', limitKwh: 150, price: 1.007 },
-      { label: 'Intermedio bajo', limitKwh: 150, price: 1.167 },
-      { label: 'Intermedio alto', limitKwh: 150, price: 1.500 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
-    ]},
-    invierno: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.148 },
-      { label: 'Intermedio', limitKwh: 100, price: 1.393 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
-    ]},
-    dacLimitKwhPerMonth: 850
-  },
-  '1D': {
-    name: 'CFE Tarifa 1D',
-    seasonStartMonth: 5, seasonEndMonth: 10,
-    verano: { blocks: [
-      { label: 'Básico', limitKwh: 175, price: 1.007 },
-      { label: 'Intermedio bajo', limitKwh: 225, price: 1.167 },
-      { label: 'Intermedio alto', limitKwh: 200, price: 1.500 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
-    ]},
-    invierno: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.148 },
-      { label: 'Intermedio', limitKwh: 125, price: 1.393 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
-    ]},
-    dacLimitKwhPerMonth: 1000
-  },
-  '1E': {
-    name: 'CFE Tarifa 1E - 2026',
-    seasonStartMonth: 4, seasonEndMonth: 10,
-    verano: { blocks: [
-      { label: 'Básico', limitKwh: 300, price: 0.842 },
-      { label: 'Intermedio bajo', limitKwh: 450, price: 1.042 },
-      { label: 'Intermedio alto', limitKwh: 150, price: 1.352 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
-    ]},
-    invierno: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.148 },
-      { label: 'Intermedio', limitKwh: 125, price: 1.393 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
-    ]},
-    dacLimitKwhPerMonth: 2000
-  },
-  '1F': {
-    name: 'CFE Tarifa 1F - 2026',
-    seasonStartMonth: 4, seasonEndMonth: 10,
-    verano: { blocks: [
-      { label: 'Básico', limitKwh: 300, price: 0.842 },
-      { label: 'Intermedio bajo', limitKwh: 900, price: 1.042 },
-      { label: 'Intermedio alto', limitKwh: 1300, price: 2.534 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
-    ]},
-    invierno: { blocks: [
-      { label: 'Básico', limitKwh: 75, price: 1.148 },
-      { label: 'Intermedio', limitKwh: 125, price: 1.393 },
-      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
-    ]},
-    dacLimitKwhPerMonth: 2500
-  }
-};
 
 // ------------------------------------------------------------------
-// Tarifas CFE y componente de select personalizado (dropdown reutilizable)
-// ------------------------------------------------------------------
-let selectedTariffCode = localStorage.getItem('selectedTariffCode') || '1';
-
-function getCurrentSeason(tariff) {
-  const month = new Date().getMonth() + 1; // 1-12
-  return (month >= tariff.seasonStartMonth && month <= tariff.seasonEndMonth) ? 'verano' : 'invierno';
-}
-
-window.onTariffChange = function (code) {
-  if (!CFE_TARIFFS[code]) return;
-  selectedTariffCode = code;
-  localStorage.setItem('selectedTariffCode', code);
-  updateEnergyCost();
-};
-
-function createCustomSelect(rootId, onSelect) {
-  const root = document.getElementById(rootId);
-  if (!root) return null;
-
-  const trigger = root.querySelector('.custom-select-trigger');
-  const label   = root.querySelector('.custom-select-label');
-  const items   = Array.from(root.querySelectorAll('.custom-select-options li'));
-
-  function close() { root.classList.remove('open'); }
-  function open() {
-    document.querySelectorAll('.custom-select.open').forEach(el => {
-      if (el !== root) el.classList.remove('open');
-    });
-    root.classList.add('open');
-  }
-
-  trigger.addEventListener('click', (e) => {
-    e.stopPropagation();
-    root.classList.contains('open') ? close() : open();
-  });
-
-  items.forEach(item => {
-    item.addEventListener('click', () => {
-      items.forEach(i => i.classList.remove('selected'));
-      item.classList.add('selected');
-      label.textContent = item.textContent;
-      close();
-      onSelect(item.dataset.value);
-    });
-  });
-
-  document.addEventListener('click', (e) => {
-    if (!root.contains(e.target)) close();
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') close();
-  });
-
-  return {
-    setValue(value) {
-      const match = items.find(i => i.dataset.value === value);
-      if (!match) return;
-      items.forEach(i => i.classList.remove('selected'));
-      match.classList.add('selected');
-      label.textContent = match.textContent;
-    }
-  };
-}
-
-let tariffSelectCtrl = null;
-let periodSelectCtrl = null;
-
-// ------------------------------------------------------------------
-// Detección y clasificación de fallas del dispositivo
-// ------------------------------------------------------------------
-function getActiveFaults(faultFlags) {
-  const flags = Number(faultFlags);
-
-  if (!Number.isFinite(flags) || flags === 0) {
-    return [];
-  }
-
-  const activeFaults = [];
-
-  Object.entries(FAULTS).forEach(([code, info]) => {
-    const mask = 1 << info.bit;
-
-    if ((flags & mask) !== 0) {
-      activeFaults.push({
-        code,
-        label: info.label,
-        severity: info.severity
-      });
-    }
-  });
-
-  return activeFaults;
-}
-
-// ------------------------------------------------------------------
-// Barra de "última alerta" (junto al botón Conectar)
-// ------------------------------------------------------------------
-function showLatestAlert(faultFlags) {
-  const alertBox = $('latestAlert');
-  const alertText = $('latestAlertText');
-
-  if (!alertBox || !alertText) return;
-
-  const activeFaults = getActiveFaults(faultFlags);
-
-  if (activeFaults.length === 0) {
-    scheduleHideLatestAlert();
-    return;
-  }
-
-  // Mientras la ESP32 siga mandando alerta, se cancela el ocultamiento
-  if (latestAlertTimeout) {
-    clearTimeout(latestAlertTimeout);
-    latestAlertTimeout = null;
-  }
-
-  // Priorizar errores sobre warnings
-  const selectedFault =
-    activeFaults.find(fault => fault.severity === 'error') || activeFaults[0];
-
-  const extraCount = activeFaults.length - 1;
-  const extraText = extraCount > 0 ? ` +${extraCount}` : '';
-
-  alertText.textContent = `${selectedFault.label}${extraText}`;
-
-  alertBox.classList.remove('hidden', 'warn', 'error');
-  alertBox.classList.add(selectedFault.severity === 'error' ? 'error' : 'warn');
-
-  lastDisplayedFaultFlags = Number(faultFlags);
-}
-
-function scheduleHideLatestAlert() {
-  const alertBox = $('latestAlert');
-  const alertText = $('latestAlertText');
-
-  if (!alertBox || !alertText) return;
-
-  if (latestAlertTimeout) {
-    clearTimeout(latestAlertTimeout);
-  }
-
-  latestAlertTimeout = setTimeout(() => {
-    alertBox.classList.add('hidden');
-    alertText.textContent = '—';
-    lastDisplayedFaultFlags = 0;
-  }, 5000);
-}
-
-// ------------------------------------------------------------------
-// Modal de alertas
-// ------------------------------------------------------------------
-let alertModalQueue = [];
-let alertModalVisible = false;
-let currentModalFault = null;      
-let currentModalOverlayEl = null;
-
-function showAlertModal(faults) {
-  if (!faults || faults.length === 0) return;
-
-  faults.forEach(f => {
-    if (f.isConnectivity && f.connectivityKey) {
-      alertModalQueue = alertModalQueue.filter(q => q.connectivityKey !== f.connectivityKey);
-
-      if (currentModalFault && currentModalFault.connectivityKey === f.connectivityKey) {
-        if (currentModalOverlayEl && currentModalOverlayEl.parentNode) {
-          currentModalOverlayEl.parentNode.removeChild(currentModalOverlayEl);
-        }
-        currentModalFault = null;
-        currentModalOverlayEl = null;
-        alertModalVisible = false;
-      }
-    }
-    alertModalQueue.push(f);
-  });
-
-  if (!alertModalVisible) {
-    _renderNextAlertModal();
-  }
-}
-
-function _renderNextAlertModal() {
-  if (alertModalQueue.length === 0) {
-    alertModalVisible = false;
-    return;
-  }
-
-  alertModalVisible = true;
-  const fault = alertModalQueue.shift();
-  currentModalFault = fault;
-
-  // Crear overlay
-  const overlay = document.createElement('div');
-  overlay.id = 'alertModalOverlay';
-  overlay.style.cssText = `
-    position: fixed; inset: 0; z-index: 9999;
-    background: rgba(0,0,0,0.65); backdrop-filter: blur(3px);
-    display: flex; align-items: center; justify-content: center;
-    animation: fadeInOverlay .15s ease;
-  `;
-
-  const isError = fault.severity === 'error';
-  const isInfo  = fault.severity === 'info';
-  const accentColor = isError ? 'var(--accent-alert)' : isInfo ? 'var(--accent-info)' : 'var(--accent-warn)';
-  const iconChar     = isError ? '🚨' : isInfo ? 'ℹ️' : '⚠️';
-
-  const box = document.createElement('div');
-  box.style.cssText = `
-    background: var(--bg3);
-    border: 2px solid ${accentColor};
-    border-radius: 10px;
-    padding: 28px 32px 24px;
-    min-width: 320px; max-width: 480px;
-    box-shadow: 0 0 32px color-mix(in srgb, ${accentColor} 33%, transparent);
-    font-family: 'Exo 2', sans-serif;
-    color: var(--text);
-    text-align: center;
-    animation: slideInModal .2s ease;
-  `;
-
-  const remaining = alertModalQueue.length;
-  const moreText = remaining > 0 ? `<div style="margin-top:8px;font-size:12px;color:var(--text-dim)">+${remaining} alerta${remaining > 1 ? 's' : ''} pendiente${remaining > 1 ? 's' : ''}</div>` : '';
-
-  box.innerHTML = `
-    <div style="font-size:38px;margin-bottom:12px">${iconChar}</div>
-    <div style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:${accentColor};margin-bottom:8px">
-      ${isError ? 'ALERTA CRÍTICA' : isInfo ? 'INFORMATIVO' : 'ADVERTENCIA'}
-    </div>
-    <div style="font-size:18px;font-weight:600;margin-bottom:20px">${fault.label}</div>
-    <div style="font-size:11px;color:var(--text-dim);margin-bottom:20px">${new Date().toLocaleString('es-MX')}</div>
-    ${moreText}
-    <button id="alertModalCloseBtn" style="
-      margin-top:18px;
-      background:color-mix(in srgb, ${accentColor} 13%, transparent); border:1px solid ${accentColor};
-      color:${accentColor}; border-radius:6px; padding:8px 28px;
-      font-size:13px; letter-spacing:1px; cursor:pointer;
-      font-family:inherit; text-transform:uppercase;
-    ">Aceptar</button>
-  `;
-
-  overlay.appendChild(box);
-  document.body.appendChild(overlay);
-  currentModalOverlayEl = overlay;
-
-  const closeModal = () => {
-    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    if (fault.severity !== 'error' && !fault.isConnectivity) {  
-      publishControl('control/ack_advertencia', '1');
-    }
-    currentModalFault = null;         
-    currentModalOverlayEl = null;
-    if (alertModalQueue.length > 0) {
-      setTimeout(_renderNextAlertModal, 300);
-    } else {
-      alertModalVisible = false;
-    }
-  };
-
-  document.getElementById('alertModalCloseBtn').addEventListener('click', closeModal);
-  // Todos los modales (error y warn) esperan click del usuario — sin auto-cierre
-}
-
-// Inyectar keyframes para la animación del modal (una sola vez)
-(function injectModalStyles() {
-  if (document.getElementById('alertModalStyles')) return;
-  const style = document.createElement('style');
-  style.id = 'alertModalStyles';
-  style.textContent = `
-    @keyframes fadeInOverlay { from { opacity:0 } to { opacity:1 } }
-    @keyframes slideInModal  { from { transform:translateY(-20px); opacity:0 } to { transform:translateY(0); opacity:1 } }
-  `;
-  document.head.appendChild(style);
-})();
-
-// ------------------------------------------------------------------
-// Referencias DOM
-// ------------------------------------------------------------------
-const $ = id => document.getElementById(id);
-
-const els = {
-  v:   $('val-v'),
-  i:   $('val-i'),
-  pa:  $('val-pa'),
-  pap: $('val-pap'),
-  pr:  $('val-pr'),
-  fp:  $('val-fp'),
-  thd: $('val-thd'),
-  kwh: $('val-kwh'),
-};
-
-// ------------------------------------------------------------------
-// Conectar / Desconectar
+// CONEXIÓN BROKER 
 // ------------------------------------------------------------------
 window.toggleConnection = function () {
   connected ? disconnect() : connect(true);
 };
 
-function startOfToday() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-function getStartTimeForRange(range) {
-  const todayStart = startOfToday();
-
-  if (range === 'hour') {
-    return Date.now() - (60 * 60 * 1000);
-  }
-
-  if (range === 'day') {
-    return todayStart;
-  }
-
-  if (range === 'week') {
-    // Hoy + 6 días anteriores = 7 días exactos
-    return todayStart - (6 * 24 * 60 * 60 * 1000);
-  }
-
-  if (range === 'bimester') {
-    // 9 semanas exactas, no 10 buckets parciales
-    return todayStart - (8 * 7 * 24 * 60 * 60 * 1000);
-  }
-
-  return Date.now() - (60 * 60 * 1000);
-}
-
-function updateHourNavClock() {
-  if (powerChartRange !== 'hour') return;
-  const labelEl = $('powerChartNavLabel');
-  if (labelEl) labelEl.textContent = new Date().toLocaleTimeString('es-MX');
-}
-
-setInterval(updateHourNavClock, 1000);
-setInterval(updateSessionTimerDisplay, 1000);
-
-setInterval(() => {
-  if (liveConnectionPeriodEl && liveConnectionPeriodStart) {
-    const startStr = new Date(liveConnectionPeriodStart).toLocaleString('es-MX');
-    const durationMs = Date.now() - new Date(liveConnectionPeriodStart);
-    liveConnectionPeriodEl.textContent = `[${startStr}] → [En curso] | ${formatDurationMs(durationMs)}`;
-  }
-  updateLiveConsumptionPeriodLine();
-}, 1000);
-
-function startOfWeekMonday(ms) {
-  const d = new Date(ms);
-  d.setHours(0, 0, 0, 0);
-  const day = d.getDay(); // 0 = domingo, 1 = lunes, ... 6 = sábado
-  const diff = (day === 0 ? -6 : 1) - day; // días para retroceder hasta el lunes
-  d.setDate(d.getDate() + diff);
-  return d.getTime();
-}
-
-function getRangeBounds(range, offset = 0) {
-  const todayStart = startOfToday();
-  const DAY_MS = 24 * 60 * 60 * 1000;
-  const nowMs = Date.now();
-
-  if (range === 'day') {
-    if (offset === 0) return { start: todayStart, end: nowMs };
-    const start = todayStart + offset * DAY_MS;
-    return { start, end: start + DAY_MS };
-  }
-
-  if (range === 'week') {
-    const currentWeekStart = startOfWeekMonday(nowMs);
-    if (offset === 0) return { start: currentWeekStart, end: nowMs };
-    const blockMs = 7 * DAY_MS;
-    const start = currentWeekStart + offset * blockMs;
-    return { start, end: start + blockMs };
-  }
-
-  // bimestre — bloques de 63 días anclados a hoy (sin cambios)
-  const blockDays = 63;
-  const blockMs = blockDays * DAY_MS;
-  const currentBlockStart = todayStart - (blockDays - 1) * DAY_MS;
-  if (offset === 0) return { start: currentBlockStart, end: nowMs };
-  const start = currentBlockStart + offset * blockMs;
-  return { start, end: start + blockMs };
-}
-
-function formatRangeLabel(range, start, end) {
-  if (range === 'day') {
-    return new Date(start).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
-  }
-  const startStr = new Date(start).toLocaleDateString('es-MX', { day: '2-digit', month: 'short' });
-  const endStr = new Date(end - 1).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
-  return `${startStr} — ${endStr}`;
-}
-
 function handleDataTimeout() {
   log('⚠ Alerta: Se dejo de recibir telemetría.', 'warn');
 
-  // 1. Mandar un objeto con puros ceros para actualizar las tarjetas y la gráfica
   updateDashboard({ 
     v: 0, i: 0, p_activa: 0, p_aparente: 0, p_reactiva: 0, fp: 0, thd: 0 
   });
 
-  // 2. Apagar el relé visualmente por seguridad
   if (relayOn) {
     relayOn = false;
     saveConsumptionPeriod();
@@ -821,9 +240,6 @@ function disconnect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 }
 
-// ------------------------------------------------------------------
-// Callbacks MQTT
-// ------------------------------------------------------------------
 function onConnected(topic) {
   connected = true;
   setStatus(true);
@@ -848,18 +264,12 @@ function onConnected(topic) {
 
   client.subscribe('smartcontact/+/estado/conexion');
 
-  // Suscripción a la telemetría (la que el usuario pone en la interfaz)
   client.subscribe(topic);
-
   client.subscribe('smartcontact/+/telemetria/estado');  
 
-  // Suscripción a las alertas
   client.subscribe('smartcontact/+/alertas');
 
-  // Suscripción al estado físico del relé 
   client.subscribe('smartcontact/+/estado/rele');
-
-  // Suscripción al estado físico de la carga 
   client.subscribe('smartcontact/+/estado/no_load_action');
 
   client.subscribe('smartcontact/+/estado/limite_potencia_max');
@@ -888,9 +298,6 @@ let reconnectTimer = null;
 let reconnectAttempts = 0;
 let firstConnection = true;
 let dashboardDisconnected = false;
-
-let liveConnectionPeriodEl = null;
-let liveConnectionPeriodStart = null;
 
 function onConnectionLost(res) {
   connected = false;
@@ -921,7 +328,7 @@ function onConnectionLost(res) {
 function scheduleReconnect() {
   if (reconnectTimer) return; 
   reconnectAttempts++;
-  const delayMs = Math.min(30000, 1000 * reconnectAttempts); // backoff: 2s, 4s, 6s... tope 30s
+  const delayMs = Math.min(30000, 1000 * reconnectAttempts); 
   log(`🛈 Reintentando conexión en ${delayMs / 1000}s…`, 'info');
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -943,14 +350,13 @@ function onMessageArrived(message) {
   const raw = message.payloadString;
   const telemetriaTopic = 'sec/datos';
 
-  // Registrar automáticamente cualquier dispositivo que publique bajo smartcontact/
   if (topic.startsWith('smartcontact/')) {
     registerDeviceFromTopic(topic);
   }
 
   if (topic.match(/^smartcontact\/(.+)\/estado\/conexion$/)) {
     const deviceId = topic.match(/^smartcontact\/(.+)\/estado\/conexion$/)[1];
-    const state = raw.trim().toLowerCase(); // "online" | "offline"
+    const state = raw.trim().toLowerCase(); 
     const previousState = lastConnState[deviceId];
 
     if (previousState !== state) {
@@ -975,9 +381,9 @@ function onMessageArrived(message) {
     }
   }
 
-  // ============================================================
-  // FLUJO A: Telemetría normal (Datos para tus gráficas)
-  // ============================================================
+
+
+  // FLUJO A: Telemetría
   else if (topic === telemetriaTopic || topic.match(/^smartcontact\/.+\/telemetria\/estado$/)) {
     //log(`☑ Recibiendo telemetría`, 'success');
     //log(`← ${raw}`, 'data');
@@ -985,7 +391,6 @@ function onMessageArrived(message) {
       const d = JSON.parse(raw);
       updateDashboard(d);
 
-      // --- Sincronización de sesión (kWh + tiempo) ---
       if (d.session_active && relayOn) {
         const elapsedMs = Number(d.session_elapsed_s ?? 0) * 1000;
         const reportedStartMs = Date.now() - elapsedMs;
@@ -1025,9 +430,8 @@ function onMessageArrived(message) {
     }
   }
   
-  // ============================================================
-  // FLUJO B: Alertas del ESP32 (Errores físicos detectados)
-  // ============================================================
+
+  // FLUJO B: Alertas
   else if (topic.match(/^smartcontact\/.+\/alertas$/)) {
     try {
       const payload = JSON.parse(raw);
@@ -1098,13 +502,11 @@ function onMessageArrived(message) {
       showAlertModal(fallasActivas.map(([, info]) => ({ label: info.label, severity: info.severity })));
 
     } catch (e) {
-      
+      log(`⚠ Error: Procesando alerta: ${e.message}`, 'error');
     }
   }
   
-  // ============================================================
-  // FLUJO C: Sincronización física del ESP32
-  // ============================================================
+  // FLUJO C: Sincronización
   else if (topic.match(/^smartcontact\/.+\/estado\/rele$/)) {
   const estadoFisico = raw.trim().toUpperCase();
   const btn  = $('onoffBtn');
@@ -1141,7 +543,7 @@ function onMessageArrived(message) {
 }
 
   else if (topic.match(/^smartcontact\/.+\/estado\/no_load_action$/)) {
-    const estadoNoLoad = raw.trim().toUpperCase(); // "OFF" o "KEEP"
+    const estadoNoLoad = raw.trim().toUpperCase(); 
 
     const offBtn  = $('noLoadOff');
     const keepBtn = $('noLoadKeep');
@@ -1149,18 +551,19 @@ function onMessageArrived(message) {
       offBtn.classList.toggle('active', estadoNoLoad === 'OFF');
       keepBtn.classList.toggle('active', estadoNoLoad === 'KEEP');
     }
-    log(`🛈 Actualización: Control de carga -> ${estadoNoLoad}`, 'info');
+    const estadoControlLoad = estadoNoLoad === 'KEEP' ? 'ON' : 'OFF';
+    log(`🛈 Actualización: Control de carga -> ${estadoControlLoad}`, 'info');
   }
 
   else if (topic.match(/^smartcontact\/.+\/estado\/limite_potencia_max$/)) {
-  const v = parseInt(raw) || 0;
+  const v = parseFloat(raw) || 0;
   $('powerLimit').value       = v;
   $('powerLimitSlider').value = Math.min(1200, v);
   log(`🛈 Actualización: Límite superior de potencia -> ${v} W`, 'info');
   }
 
   else if (topic.match(/^smartcontact\/.+\/estado\/limite_potencia_min$/)) {
-    const v = parseInt(raw) || 0;
+    const v = parseFloat(raw) || 0;
     $('powerLimitMin').value       = v;
     $('powerLimitMinSlider').value = v;
     log(`🛈 Actualización: Límite inferior de potencia -> ${v} W`, 'info');
@@ -1172,9 +575,7 @@ function onMessageArrived(message) {
   log(`🛈 Actualización: Tiempo de muestreo -> ${v} s`, 'info');
   } 
 
-  // ============================================================
-  // FLUJO D: Gráfica Armónicos THD
-  // ============================================================
+  // FLUJO D: Gráfica HARMONICS
   else if (topic.match(/^smartcontact\/.+\/telemetria\/armonicos$/)) {
 
     try {
@@ -1185,25 +586,16 @@ function onMessageArrived(message) {
     }
   }
 
-  // ============================================================
-  // FLUJO E: Gráfica Forma de onda
-  // ============================================================
+  // FLUJO E: Gráfica WAVEFORMS
   else if (topic.match(/^smartcontact\/.+\/telemetria\/waveform$/)) {
   }
 }
 
-// ------------------------------------------------------------------
-// Manejo seguro de mensajes binarios de forma de onda
-// Paho 1.0.1 no soporta payloadBytes. Al acceder a payloadString en un
-// mensaje binario puede lanzar una excepción interna que cierra la conexión.
-// Esta función lee el buffer interno de Paho (_buffer o similar) directamente.
-// ------------------------------------------------------------------
 function _handleWaveformMessage(message) {
   let arrayBuffer = null;
 
   try {
-    // Paho 1.0.1 almacena el payload como Uint8Array en message._buffer
-    // o en message.payloadBytes dependiendo de la versión exacta.
+
     if (message._buffer instanceof Uint8Array) {
       arrayBuffer = message._buffer.buffer.slice(
         message._buffer.byteOffset,
@@ -1215,8 +607,6 @@ function _handleWaveformMessage(message) {
         message.payloadBytes.byteOffset + message.payloadBytes.byteLength
       );
     } else {
-      // Último recurso: leer byte a byte evitando el getter payloadString
-      // Buscamos el Uint8Array interno recorriendo las propiedades del objeto
       let rawBuf = null;
       for (const key of Object.keys(message)) {
         const val = message[key];
@@ -1228,7 +618,6 @@ function _handleWaveformMessage(message) {
       if (rawBuf) {
         arrayBuffer = rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength);
       } else {
-        // Fallback final: charCodeAt (sólo funciona si Paho no lanzó excepción antes)
         const str = message.payloadString;
         const buf = new Uint8Array(str.length);
         for (let i = 0; i < str.length; i++) buf[i] = str.charCodeAt(i) & 0xFF;
@@ -1253,439 +642,51 @@ function _handleWaveformMessage(message) {
   }
 }
 
-window.requestWaveform = function () {
-  if (!client || !connected) {
-    log('⚠ Error: No conectado. No se puede solicitar la gráfica (WAVEFORMS).', 'error');
-    return;
-  }
-
-  pendingWaveformMode = 'manual';
-
-  const message = new Paho.MQTT.Message('1');
-  message.destinationName = WAVEFORM_REQUEST_TOPIC;
-  client.send(message);
-
-  log(`→ Solicitud de gráfica enviada (WAVEFORMS)`, 'success');
-
-  const statusEl = $('waveformStatus');
-  if (statusEl) {
-    statusEl.textContent = 'Solicitud enviada...';
-  }
-};
-
-window.requestAutoWaveform = function () {
-  if (!client || !connected) return;
-
-  pendingWaveformMode = 'auto';
-
-  const message = new Paho.MQTT.Message('1');
-  message.destinationName = WAVEFORM_REQUEST_TOPIC;
-  client.send(message);
-
-};
-
-window.requestDiagnosisWaveform = function (auto = false) {
-  pendingWaveformMode = 'silent';
-
-  return publishControl('control/waveform/request', '1', auto);
-};
-
-
-window.requestHarmonics = function () {
-  if (!client || !connected) {
-    log('⚠ Error: No conectado. No se puede solicitar la gráfica (HARMONICS).', 'error');
-    return;
-  }
-
-  const message = new Paho.MQTT.Message('1');
-  message.destinationName = HARMONICS_REQUEST_TOPIC;
-  client.send(message);
-
-  log(`→ Solicitud de gráfica enviada (HARMONICS)`, 'success');
-
-  const statusEl = $('harmonicLastUpdate');
-  if (statusEl) {
-    statusEl.textContent = 'Solicitud enviada...';
-  }
-};
-
-window.requestAutoHarmonics = function () {
-  if (!client || !connected) return;
-
-  const message = new Paho.MQTT.Message('1');
-  message.destinationName = HARMONICS_REQUEST_TOPIC;
-  client.send(message);
-};
-
-function initWaveformChart() {
-  const canvas = $('waveformChart');
-  if (!canvas) return;
-
-  const ctx = canvas.getContext('2d');
-
-  waveformChart = new Chart(ctx, {
-    type: 'line',
-    plugins: [centeredXTitlePlugin],
-    data: {
-      datasets: [
-        {
-          label: 'Voltaje (V)',
-          data: [],
-          borderColor: rootStyles.getPropertyValue('--accent-v').trim(),
-          backgroundColor: hexToRgba(rootStyles.getPropertyValue('--accent-v').trim(), 0.25),
-          borderWidth: 2,
-          tension: 0,
-          pointRadius: 0,
-          yAxisID: 'y'
-        },
-        {
-          label: 'Corriente (A)',
-          data: [],
-          borderColor: rootStyles.getPropertyValue('--accent-i').trim(),
-          backgroundColor: hexToRgba(rootStyles.getPropertyValue('--accent-i').trim(), 0.25),
-          borderWidth: 2,
-          tension: 0,
-          pointRadius: 0,
-          yAxisID: 'y1'
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      parsing: false,
-      interaction: {
-        mode: 'nearest',
-        intersect: false
-      },
-      plugins: {
-        centeredXTitle: { text: 'Tiempo (ms)' },
-        legend: {
-          labels: {
-            color: '#e0e0e0',
-            font: {
-              family: 'Share Tech Mono'
-            }
-          }
-        },
-        tooltip: {
-          callbacks: {
-            label: function(context) {
-              if (context.dataset.label.includes('Voltaje')) {
-                return `${context.dataset.label}: ${context.parsed.y.toFixed(2)} V`;
-              }
-
-              return `${context.dataset.label}: ${context.parsed.y.toFixed(3)} A`;
-            }
-          }
-        }
-      },
-      scales: {
-        x: {
-          type: 'linear',
-          title: {
-            display: true,
-            text: '',
-            color: '#e0e0e0',
-            font: {
-              family: 'Share Tech Mono',
-              size: 12
-            }
-          },
-          ticks: {
-            color: '#888888',
-            maxTicksLimit: 10
-          },
-          grid: {
-            color: '#2a2a2a'
-          }
-        },
-        y: {
-          type: 'linear',
-          position: 'left',
-          title: {
-            display: true,
-            text: 'Voltaje (V)',
-            color: '#e0e0e0',
-            font: {
-              family: 'Share Tech Mono',
-              size: 12
-            }
-          },
-          ticks: {
-            color: '#888888',
-            callback: value => value + ' V'
-          },
-          grid: {
-            color: '#2a2a2a'
-          }
-        },
-        y1: {
-          type: 'linear',
-          position: 'right',
-          title: {
-            display: true,
-            text: 'Corriente (A)',
-            color: '#e0e0e0',
-            font: {
-              family: 'Share Tech Mono',
-              size: 12
-            }
-          },
-          ticks: {
-            color: '#888888',
-            callback: value => value.toFixed(2) + ' A'
-          },
-          grid: {
-            drawOnChartArea: false
-          }
-        }
-      }
-    }
-  });
-}
-
-function parseWaveformChunk(arrayBuffer) {
-  if (arrayBuffer.byteLength < WAVEFORM_HEADER_SIZE) {
-    throw new Error(`Chunk demasiado corto: ${arrayBuffer.byteLength} bytes`);
-  }
-
-  const view = new DataView(arrayBuffer);
-
-  // Leer header con los tipos correctos según el struct del ESP32:
-  // uint32 sequence_id  @ offset 0
-  // uint64 timestamp_ms @ offset 4
-  // uint16 chunk_index  @ offset 12
-  // uint16 chunk_count  @ offset 14
-  // uint16 sample_rate  @ offset 16
-  // uint16 total_samples@ offset 18
-  // uint16 samples_in_chunk @ offset 20
-  // uint8  channels     @ offset 22
-  // uint8  format       @ offset 23
-  const sequenceId     = view.getUint32(0, true);
-  const chunkIndex     = view.getUint16(12, true);
-  const chunkCount     = view.getUint16(14, true);
-  const sampleRateHz   = view.getUint16(16, true);
-  const totalSamples   = view.getUint16(18, true);
-  const samplesInChunk = view.getUint16(20, true);
-  const channels       = view.getUint8(22);
-  const format         = view.getUint8(23);
-
-  if (channels !== WAVEFORM_CHANNELS_EXPECTED) {
-    throw new Error(`Canales no soportados: ${channels}`);
-  }
-
-  if (format !== WAVEFORM_FORMAT_I16_SCALED) {
-    throw new Error(`Formato de waveform no soportado: ${format}`);
-  }
-
-  const expectedBytes = WAVEFORM_HEADER_SIZE + samplesInChunk * channels * 2;
-  if (arrayBuffer.byteLength < expectedBytes) {
-    throw new Error(`Chunk incompleto: recibidos ${arrayBuffer.byteLength} bytes, esperados ${expectedBytes}`);
-  }
-
-  const voltage = new Array(samplesInChunk);
-  const current = new Array(samplesInChunk);
-
-  let offset = WAVEFORM_HEADER_SIZE;
-  for (let i = 0; i < samplesInChunk; i++) {
-    voltage[i] = view.getInt16(offset, true) / VOLTAGE_SCALE;
-    offset += 2;
-    current[i] = view.getInt16(offset, true) / CURRENT_SCALE;
-    offset += 2;
-  }
-
-  return {
-    sequenceId,
-    chunkIndex,
-    chunkCount,
-    sampleRateHz,
-    totalSamples,
-    samplesInChunk,
-    voltage,
-    current
-  };
-}
-
-function handleWaveformChunk(chunk) {
-  let sequence = waveformSequences.get(chunk.sequenceId);
-
-  if (!sequence) {
-    sequence = {
-      sequenceId:   chunk.sequenceId,
-      chunkCount:   chunk.chunkCount,
-      receivedCount: 0,
-      sampleRateHz: chunk.sampleRateHz,
-      totalSamples: chunk.totalSamples,
-      chunks:       new Array(chunk.chunkCount)
-    };
-    waveformSequences.set(chunk.sequenceId, sequence);
-
-    if (waveformSequences.size > 8) {
-      const oldestKey = waveformSequences.keys().next().value;
-      waveformSequences.delete(oldestKey);
-    }
-  }
-
-  if (!sequence.chunks[chunk.chunkIndex]) {
-    sequence.chunks[chunk.chunkIndex] = chunk;
-    sequence.receivedCount++;
-  }
-
-  if (sequence.receivedCount === sequence.chunkCount) {
-    renderWaveformSequence(sequence, pendingWaveformMode);
-    waveformSequences.delete(chunk.sequenceId);
-    pendingWaveformMode = 'manual';
-  }
-}
-
-function findRisingZeroCrossings(points) {
-  const crossings = [];
-  for (let i = 0; i < points.length - 1; i++) {
-    const y0 = points[i].y, y1 = points[i + 1].y;
-    if (y0 <= 0 && y1 > 0) {
-      const t0 = points[i].x, t1 = points[i + 1].x;
-      const frac = -y0 / (y1 - y0);
-      crossings.push(t0 + frac * (t1 - t0));
-    }
-  }
-  return crossings;
-}
-
-function averagePeriodMs(crossings) {
-  if (crossings.length < 2) return null;
-  let total = 0;
-  for (let i = 1; i < crossings.length; i++) total += crossings[i] - crossings[i - 1];
-  return total / (crossings.length - 1);
-}
-
-function matchCrossingDeltas(vCrossings, iCrossings) {
-  const deltas = [];
-  for (const vt of vCrossings) {
-    let nearest = null;
-    for (const it of iCrossings) {
-      const diff = it - vt;
-      if (nearest === null || Math.abs(diff) < Math.abs(nearest)) nearest = diff;
-    }
-    if (nearest !== null) deltas.push(nearest);
-  }
-  return deltas;
-}
-
-function analyzeLoadType(voltagePoints, currentPoints) {
-  const typeEl  = $('diagnosis-type');
-  const hintEl  = $('diagnosis-hint');
-  const dtEl    = $('diagnosis-dt');
-  const angleEl = $('diagnosis-angle');
-  const tsEl    = $('diagnosis-timestamp');
-  if (!typeEl) return;
-
-  const vCrossings = findRisingZeroCrossings(voltagePoints);
-  const iCrossings = findRisingZeroCrossings(currentPoints);
-
-  if (vCrossings.length < 2 || iCrossings.length < 1) {
-    typeEl.textContent = 'Datos insuficientes';
-    typeEl.style.color = 'var(--text-dim)';
-    hintEl.textContent = 'La captura fue muy corta o la corriente es demasiado baja para detectar el cruce por cero. Intenta de nuevo.';
-    dtEl.textContent = '--- ms';
-    angleEl.textContent = '---°';
-    return;
-  }
-
-  const periodMs = averagePeriodMs(vCrossings);
-  const deltas = matchCrossingDeltas(vCrossings, iCrossings);
-  deltas.sort((a, b) => a - b);
-
-  const mid = Math.floor(deltas.length / 2);
-  const dtMedian = deltas.length % 2 !== 0
-    ? deltas[mid]
-    : (deltas[mid - 1] + deltas[mid]) / 2;
-
-  const phaseDeg = (dtMedian / periodMs) * 360;
-  const THRESHOLD_DEG = 5; // tolerancia de ruido para considerar "resistiva"
-
-  let tipo, color, detalle;
-  if (Math.abs(phaseDeg) < THRESHOLD_DEG) {
-    tipo = 'Carga Resistiva';
-    color = 'var(--text)';
-    detalle = 'La corriente está prácticamente en fase con el voltaje.';
-  } else if (phaseDeg > 0) {
-    tipo = 'Carga Inductiva';
-    color = 'var(--text)';
-    detalle = 'La corriente va atrasada respecto al voltaje.';
+function setStatus(isConnected) {
+  const dot  = $('statusDot');
+  const text = $('statusText');
+  if (isConnected) {
+    dot.classList.add('connected');
+    text.textContent = 'Conectado';
   } else {
-    tipo = 'Carga Capacitiva';
-    color = 'var(--text)';
-    detalle = 'La corriente va adelantada respecto al voltaje.';
+    dot.classList.remove('connected');
+    text.textContent = 'Desconectado';
   }
-
-  typeEl.textContent = tipo;
-  typeEl.style.color = color;
-  hintEl.textContent = detalle;
-  dtEl.textContent = Math.abs(dtMedian).toFixed(3) + ' ms';
-  angleEl.textContent = phaseDeg.toFixed(1) + '°';
-  tsEl.textContent = new Date().toLocaleTimeString('es-MX');
 }
 
-function renderWaveformSequence(sequence, mode = 'manual') {
-  const voltagePoints = [];
-  const currentPoints = [];
 
+// ------------------------------------------------------------------
+// CONEXIÓN DATABASE
+// ------------------------------------------------------------------
+async function testDatabaseConnection() {
   try {
-    let sampleIndex = 0;
-    const dtMs = 1000.0 / sequence.sampleRateHz;
+    const { data, error } = await db
+      .from('telemetry')
+      .select('id, created_at')
+      .limit(1);
 
-    for (let chunkIndex = 0; chunkIndex < sequence.chunkCount; chunkIndex++) {
-      const chunk = sequence.chunks[chunkIndex];
-
-      if (!chunk) {
-        throw new Error(`falta chunk ${chunkIndex} (seq=${sequence.sequenceId})`);
-      }
-
-      for (let i = 0; i < chunk.samplesInChunk; i++) {
-        const tMs = sampleIndex * dtMs;
-        voltagePoints.push({ x: tMs, y: chunk.voltage[i] });
-        currentPoints.push({ x: tMs, y: chunk.current[i] });
-        sampleIndex++;
-      }
-    }
+    if (error) throw new Error(error.message);
+      
+    log('☑ Conectado a base de datos', 'success');
   } catch (e) {
-    log(`⚠ Error: [Procesamiento] Gráfica (WAVEFORMS): ${e.message}`, 'error');
-    return;
-  }
-
-  if (mode !== 'silent') {
-    waveformChart.data.datasets[0].data = voltagePoints;
-    waveformChart.data.datasets[1].data = currentPoints;
-
-    if (currentPoints.length > 0) {
-      const rawMax = Math.max(...currentPoints.map(p => Math.abs(p.y)));
-      const axisMax = Math.max(0.1, rawMax * 1.15);
-      waveformChart.options.scales.y1.min = -axisMax;
-      waveformChart.options.scales.y1.max =  axisMax;
-    }
-
-    waveformChart.update('none');
-
-    const statusEl = $('waveformStatus');
-    if (statusEl) {
-      statusEl.textContent =
-        `Captura completa · 60.00 Hz · Última actualización: ${new Date().toLocaleTimeString('es-MX')}`;
-    }
-
-    log(`☑ Gráfica actualizada (WAVEFORMS).`, 'success');
-  }
-
-  if (mode !== 'manual') {
-    log(`🛈 Diagnóstico ejecutado`, 'success');
-    analyzeLoadType(voltagePoints, currentPoints);
+    log(`⚠ Error: Conectado a base de datos: ${e.message}`, 'error');
   }
 }
 
-// ------------------------------------------------------------------
-// Persistencia en Supabase — alertas y periodos de consumo
-// ------------------------------------------------------------------
+let historyLoadLogged = { alerts: false, consume: false, connect: false };
+
+setInterval(() => {
+  if (liveConnectionPeriodEl && liveConnectionPeriodStart) {
+    const startStr = new Date(liveConnectionPeriodStart).toLocaleString('es-MX');
+    const durationMs = Date.now() - new Date(liveConnectionPeriodStart);
+    liveConnectionPeriodEl.textContent = `[${startStr}] → [En curso] | ${formatDurationMs(durationMs)}`;
+  }
+  updateLiveConsumptionPeriodLine();
+}, 1000);
+
+let liveConnectionPeriodEl = null;
+let liveConnectionPeriodStart = null;
+
 async function saveAlert(alertData) {
   const record = {
     code:       alertData.code      || 'FAULT_UNKNOWN',
@@ -1695,12 +696,9 @@ async function saveAlert(alertData) {
     alert_time: alertData.timestamp ?? new Date().toLocaleString('es-MX')
   };
 
-  // Siempre registrar en memoria primero — garantiza que aparezca en el historial
-  // aunque Supabase falle o la columna no exista
   localAlertLog.unshift({ time: record.alert_time, label: record.label, severity: record.severity });
-  if (localAlertLog.length > 200) localAlertLog.pop();   // máx. 200 entradas
+  if (localAlertLog.length > 200) localAlertLog.pop();   
 
-  // Actualizar historial visible inmediatamente (sin esperar a la DB)
   renderPowerAlerts();
 
   try {
@@ -1721,43 +719,6 @@ async function saveAlert(alertData) {
   } catch (e) {
     log(`⚠ Error: guardando alerta [ALERTS]: ${e.message}`, 'error');
   }
-}
-
-function processFaultFlags(faultFlags) {
-  const flags = Number(faultFlags);
-  if (!Number.isFinite(flags)) return;
-
-  // Mostrar alerta activa junto al botón de conectar
-  showLatestAlert(flags);
-
-  // Guardar en historial solo fallas nuevas
-  const newFaults = flags & ~lastFaultFlags;
-
-  if (newFaults === 0) {
-    lastFaultFlags = flags;
-    return;
-  }
-
-  Object.entries(FAULTS).forEach(([code, info]) => {
-    const mask = 1 << info.bit;
-
-    if ((newFaults & mask) !== 0) {
-      saveAlert({
-        code,
-        label: info.label,
-        severity: info.severity,
-        value: flags
-      });
-    }
-  });
-
-  // Mostrar modal para las fallas nuevas
-  const newFaultsList = Object.entries(FAULTS)
-    .filter(([, info]) => (newFaults & (1 << info.bit)) !== 0)
-    .map(([, info]) => ({ label: info.label, severity: info.severity }));
-  showAlertModal(newFaultsList);
-
-  lastFaultFlags = flags;
 }
 
 async function renderPowerAlerts() {
@@ -1805,10 +766,8 @@ async function renderPowerAlerts() {
       return `${t}|${a.label}`;
     }));
 
-    // Entradas locales que aún no están en DB (recién generadas en esta sesión)
     const onlyLocal = localAlertLog.filter(a => !dbKeys.has(`${a.time}|${a.label}`));
 
-    // Unir: primero las locales recientes, luego el histórico de DB
     const combined = [
       ...onlyLocal.map(a => ({ time: a.time, label: a.label, severity: a.severity })),
       ...data.map(a => ({
@@ -1949,7 +908,7 @@ async function renderConsumptionPeriods() {
   });
 }
 
-function updateLiveConsumptionPeriodLine() {   // ← función nueva
+function updateLiveConsumptionPeriodLine() {   
   if (!liveConsumptionPeriodEl || !periodStartTime || !periodStartTimeMs) return;
   const consumedKwh = Math.max(0, kwhTotal - periodStartKwh);
   liveConsumptionPeriodEl.textContent =
@@ -2028,11 +987,11 @@ function buildConnectionPeriods(events) {
       }
     });
     if (openStart !== null) {
-      periods.push({ deviceId, start: openStart, end: null }); // sigue conectado
+      periods.push({ deviceId, start: openStart, end: null }); 
     }
   });
 
-  periods.sort((a, b) => new Date(b.start) - new Date(a.start)); // más reciente primero
+  periods.sort((a, b) => new Date(b.start) - new Date(a.start)); 
   return periods;
 }
 
@@ -2115,10 +1074,1549 @@ window.clearConnectionHistory = async function () {
   log('⚠ Alerta: Historial borrado [CONNECT].', 'warn');
 };
 
-// ------------------------------------------------------------------
-// Gráfica de Armónicos THD
-// ------------------------------------------------------------------
 
+// ------------------------------------------------------------------
+// COMANDOS
+// ------------------------------------------------------------------
+const CONTROL_LABELS = {
+  'control/rele':               'Control de relé',
+  'control/no_load_action':     'Control de carga',
+  'control/limite_potencia':    'Limite superior de potencia',
+  'control/limite_potencia_min':'Limite inferior de potencia',
+  'control/tiempo_muestreo':    'Tiempo de muestreo',
+  'control/reset_sesion':       'Reinicio de sesión',
+  'control/waveform/request':   'Reinicio de diagnóstico',
+  'control/ack_advertencia':    'Confirmación de advertencia'
+};
+
+function publishControl(controlPath, payload, silent = false) {
+  const label = CONTROL_LABELS[controlPath] || controlPath;
+  if (!connected || !client) {
+    if (!silent) log(`⚠ Error: No conectado. No se puede enviar comando: ${label}`, 'error');
+    return false;
+  }
+  const topic = `smartcontact/${activeDeviceId}/${controlPath}`;
+  try {
+    const msg = new Paho.MQTT.Message(payload.toString());
+    msg.destinationName = topic;
+    client.send(msg);
+    if (!silent) log(`→ Comando enviado: ${label} -> ${payload}`, 'success');
+    return true;
+  } catch (e) {
+    if (!silent) log(`⚠ Error: Enviando comando ${label}: ${e.message}`, 'error');
+    return false;
+  }
+}
+
+window.requestWaveform = function () {
+  if (!client || !connected) {
+    log('⚠ Error: No conectado. No se puede solicitar la gráfica (WAVEFORMS).', 'error');
+    return;
+  }
+
+  pendingWaveformMode = 'manual';
+
+  const message = new Paho.MQTT.Message('1');
+  message.destinationName = WAVEFORM_REQUEST_TOPIC;
+  client.send(message);
+
+  log(`→ Solicitud de gráfica enviada (WAVEFORMS)`, 'success');
+
+  const statusEl = $('waveformStatus');
+  if (statusEl) {
+    statusEl.textContent = 'Solicitud enviada...';
+  }
+};
+
+window.requestAutoWaveform = function () {
+  if (!client || !connected) return;
+
+  pendingWaveformMode = 'auto';
+
+  const message = new Paho.MQTT.Message('1');
+  message.destinationName = WAVEFORM_REQUEST_TOPIC;
+  client.send(message);
+
+};
+
+window.requestDiagnosisWaveform = function (auto = false) {
+  pendingWaveformMode = 'silent';
+
+  return publishControl('control/waveform/request', '1', auto);
+};
+
+window.requestHarmonics = function () {
+  if (!client || !connected) {
+    log('⚠ Error: No conectado. No se puede solicitar la gráfica (HARMONICS).', 'error');
+    return;
+  }
+
+  const message = new Paho.MQTT.Message('1');
+  message.destinationName = HARMONICS_REQUEST_TOPIC;
+  client.send(message);
+
+  log(`→ Solicitud de gráfica enviada (HARMONICS)`, 'success');
+
+  const statusEl = $('harmonicLastUpdate');
+  if (statusEl) {
+    statusEl.textContent = 'Solicitud enviada...';
+  }
+};
+
+window.requestAutoHarmonics = function () {
+  if (!client || !connected) return;
+
+  const message = new Paho.MQTT.Message('1');
+  message.destinationName = HARMONICS_REQUEST_TOPIC;
+  client.send(message);
+};
+
+window.resetKwh = function () {
+  if (publishControl('control/reset_sesion', '1')) {
+    log('⚠ Alerta: Sesión reseteada.', 'warn');
+  }
+};
+
+window.resetDiagnosis = function () {
+  if (requestDiagnosisWaveform()) {
+    showDiagnosisPlaceholder('Solicitando nueva captura...');
+    log('⚠ Alerta: Diagnóstico reseteado.', 'warn');
+  }
+};
+
+// Límite superior de potencia
+window.syncPowerLimit = function (val) {
+  let v = parseFloat(val);
+  const minVal = parseFloat($('powerLimitMin').value) || 0;
+  if (v < minVal) v = minVal; 
+  $('powerLimit').value       = v;
+  $('powerLimitSlider').value = v;
+};
+window.updatePowerLimitDisplay = function () {
+  let v = parseFloat($('powerLimit').value);
+  if (isNaN(v)) v = 0;
+  v = Math.min(1200, Math.max(0, v));
+
+  const minVal = parseFloat($('powerLimitMin').value) || 0;
+  if (v < minVal) v = minVal;
+
+  $('powerLimit').value       = v;
+  $('powerLimitSlider').value = Math.min(1200, v);
+};
+
+// Límite inferior de potencia
+window.syncPowerLimitMin = function (val) {
+  let v = parseFloat(val);
+  const maxVal = parseFloat($('powerLimit').value) || 1200;
+  if (v > maxVal) v = maxVal; 
+  $('powerLimitMin').value       = v;
+  $('powerLimitMinSlider').value = v;
+};
+window.updatePowerLimitMinDisplay = function () {
+  let v = parseFloat($('powerLimitMin').value);
+  if (isNaN(v)) v = 0;
+  v = Math.min(1200, Math.max(0, v));
+
+  const maxVal = parseFloat($('powerLimit').value) || 1200;
+  if (v > maxVal) v = maxVal;
+
+  $('powerLimitMin').value       = v;
+  $('powerLimitMinSlider').value = Math.min(1200, v);
+};
+
+// Tiempo de muestreo
+window.syncSampleRate = function (val) {
+  $('sampleRate').value = val;
+};
+window.updateSampleDisplay = function () {
+  let v = parseInt($('sampleRate').value);
+  if (isNaN(v)) v = 1;
+  v = Math.min(60, Math.max(1, v));
+  $('sampleRate').value   = v;
+  $('sampleSlider').value = Math.min(60, v);
+};
+
+// 1. Comando de Control de Relé
+window.toggleRelay = function () {
+  const payload = relayOn ? 'OFF' : 'ON';
+  publishControl('control/rele', payload);
+};
+
+// 2. Comando de Control de Carga
+window.sendNoLoadAction = function (value) {
+  publishControl('control/no_load_action', value);
+};
+
+// 3. Comando de Límite Superior de Potencia
+window.sendPowerLimit = function () {
+  const rawValue = parseFloat($('powerLimitSlider').value) || 0;
+  publishControl('control/limite_potencia', rawValue.toFixed(1));
+};
+
+// 4. Comando de Límite Inferior de Potencia
+window.sendPowerLimitMin = function () {
+  const rawValue = parseFloat($('powerLimitMinSlider').value) || 0;
+  publishControl('control/limite_potencia_min', rawValue.toFixed(1));
+};
+
+// 5. Comando de Tiempo de Muestreo
+window.sendSampleRate = function () {
+  const sampleValue = $('sampleRate').value;
+  publishControl('control/tiempo_muestreo', sampleValue);
+  applySampleRate(sampleValue);
+};
+
+
+// ------------------------------------------------------------------
+// FALLAS Y ALERTAS
+// ------------------------------------------------------------------
+const FAULTS = {
+  FAULT_OVERVOLTAGE: {
+    bit: 1,
+    label: 'Alto voltaje',
+    severity: 'warn'
+  },
+  FAULT_UNDERVOLTAGE: {
+    bit: 2,
+    label: 'Bajo voltaje',
+    severity: 'warn'
+  },
+  FAULT_OVERCURRENT: {
+    bit: 3,
+    label: 'Alta corriente',
+    severity: 'error'
+  },
+  FAULT_UNDERCURRENT: {
+    bit: 4,
+    label: 'Baja corriente',
+    severity: 'error'
+  },
+  FAULT_OVERPOWER: {
+    bit: 5,
+    label: 'Sobrecarga de potencia',
+    severity: 'error'
+  },
+  FAULT_UNDERPOWER: {
+    bit: 6,
+    label: 'Subcarga de potencia',
+    severity: 'error'
+  },
+  FAULT_HIGH_POWER: {
+    bit: 7,
+    label: 'Potencia acercándose al límite superior',
+    severity: 'warn'
+  },
+  FAULT_LOW_POWER: {
+    bit: 8,
+    label: 'Potencia acercándose al límite inferior',
+    severity: 'warn'
+  },
+  FAULT_CURRENT_RELAY_CLOSED: {
+    bit: 9,
+    label: 'Corriente no detectada con relé cerrado',
+    severity: 'warn'
+  },
+  FAULT_CURRENT_RELAY_OPEN: {
+    bit: 10,
+    label: 'Corriente detectada con relé abierto',
+    severity: 'warn'
+  },
+  FAULT_RELAY_FAILED_TO_OPEN: {
+    bit: 12,
+    label: 'Falla en abrir el relé',
+    severity: 'error'
+  },
+   FAULT_SENSOR_ADC_DISCONNECTED: {
+    bit: 13,
+    label: 'Sensor ADC desconectado (sin señal)',
+    severity: 'error'
+  },
+  FAULT_SENSOR_ZCM_DISCONNECTED: {
+    bit: 14,
+    label: 'Sensor ZCM desconectado (sin señal)',
+    severity: 'error'
+  },
+  FAULT_SENSOR_ADC_INVALID: {
+    bit: 15,
+    label: 'Señal de sensor ADC inválida',
+    severity: 'warn'
+  },
+  FAULT_SENSOR_ZCM_INVALID: {
+    bit: 16,
+    label: 'Señal de sensor ZCM inválida',
+    severity: 'warn'
+  },
+  FAULT_FREQUENCY_OUT_OF_RANGE: {
+    bit: 17,
+    label: 'Frecuencia de línea fuera de rango',
+    severity: 'warn'
+  }
+};
+
+function getActiveFaults(faultFlags) {
+  const flags = Number(faultFlags);
+
+  if (!Number.isFinite(flags) || flags === 0) {
+    return [];
+  }
+
+  const activeFaults = [];
+
+  Object.entries(FAULTS).forEach(([code, info]) => {
+    const mask = 1 << info.bit;
+
+    if ((flags & mask) !== 0) {
+      activeFaults.push({
+        code,
+        label: info.label,
+        severity: info.severity
+      });
+    }
+  });
+
+  return activeFaults;
+}
+
+function showLatestAlert(faultFlags) {
+  const alertBox = $('latestAlert');
+  const alertText = $('latestAlertText');
+
+  if (!alertBox || !alertText) return;
+
+  const activeFaults = getActiveFaults(faultFlags);
+
+  if (activeFaults.length === 0) {
+    scheduleHideLatestAlert();
+    return;
+  }
+
+  if (latestAlertTimeout) {
+    clearTimeout(latestAlertTimeout);
+    latestAlertTimeout = null;
+  }
+
+  const selectedFault =
+    activeFaults.find(fault => fault.severity === 'error') || activeFaults[0];
+
+  const extraCount = activeFaults.length - 1;
+  const extraText = extraCount > 0 ? ` +${extraCount}` : '';
+
+  alertText.textContent = `${selectedFault.label}${extraText}`;
+
+  alertBox.classList.remove('hidden', 'warn', 'error');
+  alertBox.classList.add(selectedFault.severity === 'error' ? 'error' : 'warn');
+
+  lastDisplayedFaultFlags = Number(faultFlags);
+}
+
+function scheduleHideLatestAlert() {
+  const alertBox = $('latestAlert');
+  const alertText = $('latestAlertText');
+
+  if (!alertBox || !alertText) return;
+
+  if (latestAlertTimeout) {
+    clearTimeout(latestAlertTimeout);
+  }
+
+  latestAlertTimeout = setTimeout(() => {
+    alertBox.classList.add('hidden');
+    alertText.textContent = '—';
+    lastDisplayedFaultFlags = 0;
+  }, 5000);
+}
+
+let alertModalQueue = [];
+let alertModalVisible = false;
+let currentModalFault = null;      
+let currentModalOverlayEl = null;
+
+function showAlertModal(faults) {
+  if (!faults || faults.length === 0) return;
+
+  faults.forEach(f => {
+    if (f.isConnectivity && f.connectivityKey) {
+      alertModalQueue = alertModalQueue.filter(q => q.connectivityKey !== f.connectivityKey);
+
+      if (currentModalFault && currentModalFault.connectivityKey === f.connectivityKey) {
+        if (currentModalOverlayEl && currentModalOverlayEl.parentNode) {
+          currentModalOverlayEl.parentNode.removeChild(currentModalOverlayEl);
+        }
+        currentModalFault = null;
+        currentModalOverlayEl = null;
+        alertModalVisible = false;
+      }
+    }
+    alertModalQueue.push(f);
+  });
+
+  if (!alertModalVisible) {
+    _renderNextAlertModal();
+  }
+}
+
+function _renderNextAlertModal() {
+  if (alertModalQueue.length === 0) {
+    alertModalVisible = false;
+    return;
+  }
+
+  alertModalVisible = true;
+  const fault = alertModalQueue.shift();
+  currentModalFault = fault;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'alertModalOverlay';
+  overlay.style.cssText = `
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(0,0,0,0.65); backdrop-filter: blur(3px);
+    display: flex; align-items: center; justify-content: center;
+    animation: fadeInOverlay .15s ease;
+  `;
+
+  const isError = fault.severity === 'error';
+  const isInfo  = fault.severity === 'info';
+  const accentColor = isError ? 'var(--accent-alert)' : isInfo ? 'var(--accent-info)' : 'var(--accent-warn)';
+  const iconChar     = isError ? '🚨' : isInfo ? 'ℹ️' : '⚠️';
+
+  const box = document.createElement('div');
+  box.style.cssText = `
+    background: var(--bg3);
+    border: 2px solid ${accentColor};
+    border-radius: 10px;
+    padding: 28px 32px 24px;
+    min-width: 320px; max-width: 480px;
+    box-shadow: 0 0 32px color-mix(in srgb, ${accentColor} 33%, transparent);
+    font-family: 'Exo 2', sans-serif;
+    color: var(--text);
+    text-align: center;
+    animation: slideInModal .2s ease;
+  `;
+
+  const remaining = alertModalQueue.length;
+  const moreText = remaining > 0 ? `<div style="margin-top:8px;font-size:12px;color:var(--text-dim)">+${remaining} alerta${remaining > 1 ? 's' : ''} pendiente${remaining > 1 ? 's' : ''}</div>` : '';
+
+  box.innerHTML = `
+    <div style="font-size:38px;margin-bottom:12px">${iconChar}</div>
+    <div style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:${accentColor};margin-bottom:8px">
+      ${isError ? 'ALERTA CRÍTICA' : isInfo ? 'INFORMATIVO' : 'ADVERTENCIA'}
+    </div>
+    <div style="font-size:18px;font-weight:600;margin-bottom:20px">${fault.label}</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:20px">${new Date().toLocaleString('es-MX')}</div>
+    ${moreText}
+    <button id="alertModalCloseBtn" style="
+      margin-top:18px;
+      background:color-mix(in srgb, ${accentColor} 13%, transparent); border:1px solid ${accentColor};
+      color:${accentColor}; border-radius:6px; padding:8px 28px;
+      font-size:13px; letter-spacing:1px; cursor:pointer;
+      font-family:inherit; text-transform:uppercase;
+    ">Aceptar</button>
+  `;
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  currentModalOverlayEl = overlay;
+
+  const closeModal = () => {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    if (fault.severity !== 'error' && !fault.isConnectivity) {  
+      publishControl('control/ack_advertencia', '1');
+    }
+    currentModalFault = null;         
+    currentModalOverlayEl = null;
+    if (alertModalQueue.length > 0) {
+      setTimeout(_renderNextAlertModal, 300);
+    } else {
+      alertModalVisible = false;
+    }
+  };
+
+  document.getElementById('alertModalCloseBtn').addEventListener('click', closeModal);
+}
+
+(function injectModalStyles() {
+  if (document.getElementById('alertModalStyles')) return;
+  const style = document.createElement('style');
+  style.id = 'alertModalStyles';
+  style.textContent = `
+    @keyframes fadeInOverlay { from { opacity:0 } to { opacity:1 } }
+    @keyframes slideInModal  { from { transform:translateY(-20px); opacity:0 } to { transform:translateY(0); opacity:1 } }
+  `;
+  document.head.appendChild(style);
+})();
+
+function processFaultFlags(faultFlags) {
+  const flags = Number(faultFlags);
+  if (!Number.isFinite(flags)) return;
+
+  showLatestAlert(flags);
+
+  const newFaults = flags & ~lastFaultFlags;
+
+  if (newFaults === 0) {
+    lastFaultFlags = flags;
+    return;
+  }
+
+  Object.entries(FAULTS).forEach(([code, info]) => {
+    const mask = 1 << info.bit;
+
+    if ((newFaults & mask) !== 0) {
+      saveAlert({
+        code,
+        label: info.label,
+        severity: info.severity,
+        value: flags
+      });
+    }
+  });
+
+  const newFaultsList = Object.entries(FAULTS)
+    .filter(([, info]) => (newFaults & (1 << info.bit)) !== 0)
+    .map(([, info]) => ({ label: info.label, severity: info.severity }));
+  showAlertModal(newFaultsList);
+
+  lastFaultFlags = flags;
+}
+
+
+// ------------------------------------------------------------------
+// TARJETAS GENERALES
+// ------------------------------------------------------------------
+function updateDashboard(d) {
+  if (d.v !== undefined) {
+    setVal('v', d.v, 2, 'V');
+    setBar('bar-v', d.v, LIMITS.v);
+  }
+  if (d.i !== undefined) {
+    setVal('i', d.i, 2, 'A');
+    setBar('bar-i', d.i, LIMITS.i);
+  }
+  if (d.p_activa !== undefined) {
+    setVal('pa', d.p_activa, 1, 'W');
+    lastPowerW = parseFloat(d.p_activa);
+    trianglePa = lastPowerW;
+
+    updatePowerChart(lastPowerW);
+  }
+  if (d.p_aparente !== undefined) { setVal('pap', d.p_aparente, 1, 'VA'); trianglePap = parseFloat(d.p_aparente); }
+  if (d.p_reactiva !== undefined) { setVal('pr',  d.p_reactiva, 1, 'VAR'); trianglePr = parseFloat(d.p_reactiva); }
+
+  updatePowerTriangle(trianglePa, trianglePr, trianglePap);
+  updateEfficiency(trianglePa, trianglePap);
+
+  if (d.fp         !== undefined) { setVal('fp', d.fp, 2, ''); updateFpArc(d.fp); }
+  if (d.thd        !== undefined) { setVal('thd', d.thd, 2, '%'); updateThdStatus(d.thd); }
+  if (d.fault_flags !== undefined) {
+    processFaultFlags(d.fault_flags);
+  }
+  
+}
+
+function setVal(key, value, decimals, unit) {
+  const el = els[key];
+  if (!el) return;
+  el.textContent = parseFloat(value).toFixed(decimals);
+
+  const unitEl = el.parentElement.querySelector('.card-unit');
+  if (unitEl && unit) unitEl.textContent = unit;
+}
+
+function setBar(barId, value, max) {
+  const pct = Math.min(100, Math.max(0, (value / max) * 100));
+  $(barId).style.width = pct + '%';
+}
+
+const LIVE_CARD_IDS = ['card-v', 'card-i', 'card-kwh', 'card-cost', 'card-power', 'card-diagnosis', 'card-fp', 'card-thd', 'card-efficiency'];
+
+function setSystemOffline() {
+  LIVE_CARD_IDS.forEach(id => setCardStatusColor(id, 'off'));
+
+  const barV = $('bar-v');
+  const barI = $('bar-i');
+  if (barV) barV.style.width = '0%';
+  if (barI) barI.style.width = '0%';
+
+  resetArc('fp-arc-fill', 'fp-rating');
+  resetArc('thd-arc-fill', 'thd-rating');
+  resetArc('efficiency-arc-fill', 'efficiency-rating');
+
+  trianglePa = 0;
+  trianglePap = 0;
+  trianglePr = 0;
+  updatePowerTriangle(0, 0, 0);
+
+  const offBtn  = $('noLoadOff');
+  const keepBtn = $('noLoadKeep');
+  if (offBtn)  offBtn.classList.remove('active');
+  if (keepBtn) keepBtn.classList.remove('active');
+
+  const onoffBtnEl = $('onoffBtn');
+  if (onoffBtnEl) {
+    onoffBtnEl.className = 'onoff-btn onoff-unknown';
+    const iconEl = $('onoffIcon');
+    const textEl = $('onoffText');
+    const hintEl = $('onoffHint');
+    if (iconEl) iconEl.textContent = '●';
+    if (textEl) textEl.textContent = '—';
+    if (hintEl) hintEl.textContent = 'Esperando conexión…';
+  }
+}
+
+function setSystemOnline() {
+  LIVE_CARD_IDS.forEach(id => {
+    const card = document.getElementById(id);
+    if (card) card.style.removeProperty('--status-color');
+  });
+}
+
+const STATUS_COLORS = {
+  off:    rootStyles.getPropertyValue('--status-off').trim(),
+  good:   rootStyles.getPropertyValue('--status-good').trim(),
+  warn:   rootStyles.getPropertyValue('--status-warn').trim(),
+  alert:  rootStyles.getPropertyValue('--status-alert').trim(),
+  danger: rootStyles.getPropertyValue('--status-danger').trim(),
+};
+
+function setCardStatusColor(cardId, level) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  card.style.setProperty('--status-color', STATUS_COLORS[level] || STATUS_COLORS.off);
+}
+
+function updateFpArc(fp) {
+  const arcLen = 125.5;
+  const filled = Math.min(1, Math.max(0, fp)) * arcLen;
+  const arcEl  = $('fp-arc-fill');
+  arcEl.setAttribute('stroke-dasharray', `${filled} ${arcLen}`);
+
+  let level, label;
+  if      (fp === 0)   { level = 'off';    label = '—'; }
+  else if (fp >= 0.95) { level = 'good';   label = 'EXCELENTE'; }
+  else if (fp >= 0.75) { level = 'warn';   label = 'BUENO'; }
+  else if (fp >= 0.50) { level = 'alert';  label = 'REGULAR'; }
+  else                 { level = 'danger'; label = 'BAJO'; }
+
+  const color = STATUS_COLORS[level];
+  arcEl.setAttribute('stroke', color);
+  $('fp-rating').textContent = label;
+  $('fp-rating').style.color = color;
+  setCardStatusColor('card-fp', level);
+}
+
+function resetArc(arcId, ratingId) {
+  const arcEl = $(arcId);
+  if (arcEl) {
+    arcEl.setAttribute('stroke-dasharray', '0 125.5');
+    arcEl.setAttribute('stroke', STATUS_COLORS.off);
+  }
+  const ratingEl = $(ratingId);
+  if (ratingEl) {
+    ratingEl.textContent = '—';
+    ratingEl.style.color = STATUS_COLORS.off;
+  }
+}
+
+function updateThdStatus(thd) {
+  let level, label;
+  if      (thd === 0) { level = 'off';    label = '—'; }
+  else if (thd < 25)  { level = 'good';   label = 'BAJO'; }
+  else if (thd < 50)  { level = 'warn';   label = 'MODERADO'; }
+  else if (thd < 75)  { level = 'alert';  label = 'ALTO'; }
+  else                 { level = 'danger'; label = 'CRÍTICO'; }
+
+  const color  = STATUS_COLORS[level];
+  const arcLen = 125.5;
+  const filled = Math.min(1, Math.max(0, thd / 100)) * arcLen;
+  const arcEl  = $('thd-arc-fill');
+  if (arcEl) {
+    arcEl.setAttribute('stroke-dasharray', `${filled} ${arcLen}`);
+    arcEl.setAttribute('stroke', color);
+  }
+  const ratingEl = $('thd-rating');
+  if (ratingEl) {
+    ratingEl.textContent = label;
+    ratingEl.style.color = color;
+  }
+
+  setCardStatusColor('card-thd', level);
+}
+
+function updateEfficiency(p, s) {
+  const el = $('val-efficiency');
+  if (!el) return;
+
+  const pAbs = Math.abs(p);
+  const sAbs = Math.abs(s);
+  const eff  = sAbs > 0 ? Math.min(100, (pAbs / sAbs) * 100) : 0;
+
+  el.textContent = eff.toFixed(2);
+  updateEfficiencyArc(eff);
+}
+
+function updateEfficiencyArc(eff) {
+  const arcLen = 125.5;
+  const filled = Math.min(1, Math.max(0, eff / 100)) * arcLen;
+  const arcEl  = $('efficiency-arc-fill');
+  if (!arcEl) return;
+
+  let level, label;
+  if      (eff === 0) { level = 'off';    label = '—'; }
+  else if (eff >= 95) { level = 'good';   label = 'EXCELENTE'; }
+  else if (eff >= 75) { level = 'warn';   label = 'BUENA'; }
+  else if (eff >= 50) { level = 'alert';  label = 'REGULAR'; }
+  else                { level = 'danger'; label = 'BAJA'; }
+
+  const color = STATUS_COLORS[level];
+  arcEl.setAttribute('stroke-dasharray', `${filled} ${arcLen}`);
+  arcEl.setAttribute('stroke', color);
+
+  const ratingEl = $('efficiency-rating');
+  if (ratingEl) {
+    ratingEl.textContent = label;
+    ratingEl.style.color = color;
+  }
+
+  setCardStatusColor('card-efficiency', level);
+}
+
+
+// ------------------------------------------------------------------
+// TARJETAS ESPECIALES
+// ------------------------------------------------------------------
+function createCustomSelect(rootId, onSelect) {
+  const root = document.getElementById(rootId);
+  if (!root) return null;
+
+  const trigger = root.querySelector('.custom-select-trigger');
+  const label   = root.querySelector('.custom-select-label');
+  const items   = Array.from(root.querySelectorAll('.custom-select-options li'));
+
+  function close() { root.classList.remove('open'); }
+  function open() {
+    document.querySelectorAll('.custom-select.open').forEach(el => {
+      if (el !== root) el.classList.remove('open');
+    });
+    root.classList.add('open');
+  }
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    root.classList.contains('open') ? close() : open();
+  });
+
+  items.forEach(item => {
+    item.addEventListener('click', () => {
+      items.forEach(i => i.classList.remove('selected'));
+      item.classList.add('selected');
+      label.textContent = item.textContent;
+      close();
+      onSelect(item.dataset.value);
+    });
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!root.contains(e.target)) close();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close();
+  });
+
+  return {
+    setValue(value) {
+      const match = items.find(i => i.dataset.value === value);
+      if (!match) return;
+      items.forEach(i => i.classList.remove('selected'));
+      match.classList.add('selected');
+      label.textContent = match.textContent;
+    }
+  };
+}
+
+let tariffSelectCtrl = null;
+let periodSelectCtrl = null;
+
+// Tarjeta COST
+const CFE_TARIFFS = {
+  '1': {
+    name: 'CFE Tarifa 1',
+    seasonStartMonth: 5, seasonEndMonth: 10,
+    verano: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.125 },
+      { label: 'Intermedio', limitKwh: 65, price: 1.369 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
+    ]},
+    invierno: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.148 },
+      { label: 'Intermedio', limitKwh: 65, price: 1.393 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
+    ]},
+    dacLimitKwhPerMonth: 250
+  },
+  '1A': {
+    name: 'CFE Tarifa 1A',
+    seasonStartMonth: 5, seasonEndMonth: 10,
+    verano: { blocks: [
+      { label: 'Básico', limitKwh: 100, price: 1.007 },
+      { label: 'Intermedio', limitKwh: 50, price: 1.167 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
+    ]},
+    invierno: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.148 },
+      { label: 'Intermedio', limitKwh: 75, price: 1.393 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
+    ]},
+    dacLimitKwhPerMonth: 300
+  },
+  '1B': {
+    name: 'CFE Tarifa 1B',
+    seasonStartMonth: 5, seasonEndMonth: 10,
+    verano: { blocks: [
+      { label: 'Básico', limitKwh: 125, price: 1.007 },
+      { label: 'Intermedio', limitKwh: 100, price: 1.167 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
+    ]},
+    invierno: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.148 },
+      { label: 'Intermedio', limitKwh: 100, price: 1.393 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
+    ]},
+    dacLimitKwhPerMonth: 400
+  },
+  '1C': {
+    name: 'CFE Tarifa 1C',
+    seasonStartMonth: 5, seasonEndMonth: 10,
+    verano: { blocks: [
+      { label: 'Básico', limitKwh: 150, price: 1.007 },
+      { label: 'Intermedio bajo', limitKwh: 150, price: 1.167 },
+      { label: 'Intermedio alto', limitKwh: 150, price: 1.500 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
+    ]},
+    invierno: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.148 },
+      { label: 'Intermedio', limitKwh: 100, price: 1.393 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
+    ]},
+    dacLimitKwhPerMonth: 850
+  },
+  '1D': {
+    name: 'CFE Tarifa 1D',
+    seasonStartMonth: 5, seasonEndMonth: 10,
+    verano: { blocks: [
+      { label: 'Básico', limitKwh: 175, price: 1.007 },
+      { label: 'Intermedio bajo', limitKwh: 225, price: 1.167 },
+      { label: 'Intermedio alto', limitKwh: 200, price: 1.500 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
+    ]},
+    invierno: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.148 },
+      { label: 'Intermedio', limitKwh: 125, price: 1.393 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
+    ]},
+    dacLimitKwhPerMonth: 1000
+  },
+  '1E': {
+    name: 'CFE Tarifa 1E - 2026',
+    seasonStartMonth: 4, seasonEndMonth: 10,
+    verano: { blocks: [
+      { label: 'Básico', limitKwh: 300, price: 0.842 },
+      { label: 'Intermedio bajo', limitKwh: 450, price: 1.042 },
+      { label: 'Intermedio alto', limitKwh: 150, price: 1.352 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
+    ]},
+    invierno: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.148 },
+      { label: 'Intermedio', limitKwh: 125, price: 1.393 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
+    ]},
+    dacLimitKwhPerMonth: 2000
+  },
+  '1F': {
+    name: 'CFE Tarifa 1F - 2026',
+    seasonStartMonth: 4, seasonEndMonth: 10,
+    verano: { blocks: [
+      { label: 'Básico', limitKwh: 300, price: 0.842 },
+      { label: 'Intermedio bajo', limitKwh: 900, price: 1.042 },
+      { label: 'Intermedio alto', limitKwh: 1300, price: 2.534 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.004 }
+    ]},
+    invierno: { blocks: [
+      { label: 'Básico', limitKwh: 75, price: 1.148 },
+      { label: 'Intermedio', limitKwh: 125, price: 1.393 },
+      { label: 'Excedente', limitKwh: Infinity, price: 4.08 }
+    ]},
+    dacLimitKwhPerMonth: 2500
+  }
+};
+
+let selectedTariffCode = localStorage.getItem('selectedTariffCode') || '1';
+
+function getCurrentSeason(tariff) {
+  const month = new Date().getMonth() + 1; 
+  return (month >= tariff.seasonStartMonth && month <= tariff.seasonEndMonth) ? 'verano' : 'invierno';
+}
+
+window.onTariffChange = function (code) {
+  if (!CFE_TARIFFS[code]) return;
+  selectedTariffCode = code;
+  localStorage.setItem('selectedTariffCode', code);
+  updateEnergyCost();
+};
+
+setInterval(updateSessionTimerDisplay, 1000);
+
+function calculateTieredEnergyCost(kwh) {
+  const tariff = CFE_TARIFFS[selectedTariffCode] || CFE_TARIFFS['1C'];
+  const season = getCurrentSeason(tariff);
+  const blocks = tariff[season].blocks;
+
+  let remainingKwh = Math.max(0, Number(kwh) || 0);
+  let totalCost = 0;
+  const details = [];
+
+  blocks.forEach(block => {
+    if (remainingKwh <= 0) return;
+
+    const blockKwh = Math.min(remainingKwh, block.limitKwh);
+    const blockCost = blockKwh * block.price;
+
+    details.push({
+      label: block.label,
+      kwh: blockKwh,
+      price: block.price,
+      cost: blockCost
+    });
+
+    totalCost += blockCost;
+    remainingKwh -= blockKwh;
+  });
+
+  return {
+    totalCost,
+    details,
+    season,
+    isDacRisk: kwh >= tariff.dacLimitKwhPerMonth
+  };
+}
+
+let energyPeriodRange = 'bimester';
+
+window.setEnergyPeriodRange = function (range) {
+  energyPeriodRange = range;
+  updateEnergyCost();
+};
+
+function calculateTieredEnergyCostRange(startKwh, endKwh, tariff, season) {
+  const blocks = tariff[season].blocks;
+  let cursor = 0;
+  let totalCost = 0;
+  const details = [];
+
+  blocks.forEach(block => {
+    const blockStart = cursor;
+    const blockEnd = cursor + block.limitKwh;
+
+    const overlapStart = Math.max(startKwh, blockStart);
+    const overlapEnd = Math.min(endKwh, blockEnd);
+    const overlapKwh = Math.max(0, overlapEnd - overlapStart);
+
+    if (overlapKwh > 0) {
+      const blockCost = overlapKwh * block.price;
+      details.push({ label: block.label, kwh: overlapKwh, price: block.price, cost: blockCost });
+      totalCost += blockCost;
+    }
+
+    cursor = blockEnd;
+  });
+
+  return { totalCost, details };
+}
+
+async function updateEnergyCost() {
+  const bimesterStartIso = getIsoStartForRange('bimester');
+  const periodStartMs = getStartTimeForRange(energyPeriodRange);
+  const pageSize = 1000;
+  let allRows = [];
+  let offset = 0;
+
+  try {
+    while (true) {
+      const { data, error } = await db
+        .from('consumption_points')
+        .select('created_at, energy_kwh')
+        .gte('created_at', bimesterStartIso)
+        .order('created_at', { ascending: true })
+        .range(offset, offset + pageSize - 1);
+
+      if (error) {
+        return;
+      }
+
+      if (!data || data.length === 0) break;
+      allRows = allRows.concat(data);
+      if (data.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    const bimesterKwh = allRows.reduce((total, item) => total + Number(item.energy_kwh || 0), 0);
+
+    const periodKwh = energyPeriodRange === 'bimester'
+      ? bimesterKwh
+      : allRows
+          .filter(item => new Date(item.created_at).getTime() >= periodStartMs)
+          .reduce((total, item) => total + Number(item.energy_kwh || 0), 0);
+
+    const tariff = CFE_TARIFFS[selectedTariffCode] || CFE_TARIFFS['1C'];
+    const season = getCurrentSeason(tariff);
+
+    const baseKwh = Math.max(0, bimesterKwh - periodKwh);
+    const result = calculateTieredEnergyCostRange(baseKwh, bimesterKwh, tariff, season);
+    result.season = season;
+    result.isDacRisk = bimesterKwh >= tariff.dacLimitKwhPerMonth; 
+
+    const costEl = $('val-cost');
+    const costBlockEl = $('cost-block');
+    const costBreakdownEl = $('cost-breakdown');
+    const dacWarningEl = $('dac-warning');
+    const valKwhEl = $('val-kwh');
+
+    if (valKwhEl) valKwhEl.textContent = periodKwh.toFixed(4);
+    if (costEl) costEl.textContent = '$' + result.totalCost.toFixed(4);
+    if (tariffSelectCtrl) tariffSelectCtrl.setValue(selectedTariffCode);
+
+    if (costBlockEl) {
+      const lastBlock = result.details[result.details.length - 1];
+      costBlockEl.textContent = lastBlock ? lastBlock.label : 'Sin consumo';
+    }
+
+    if (costBreakdownEl) {
+      if (result.details.length === 0) {
+        costBreakdownEl.textContent = 'Sin consumo registrado en este periodo.';
+      } else {
+        const seasonLabel = result.season === 'verano' ? '☀ Temporada de verano' : '❄ Temporada de invierno';
+        const lines = result.details
+          .map(item => `${item.label}: ${item.kwh.toFixed(4)} kWh × $${item.price.toFixed(4)} = $${item.cost.toFixed(4)}`);
+        costBreakdownEl.innerHTML = `<strong>${seasonLabel}</strong><br>` + lines.join('<br>');
+      }
+    }
+
+    if (dacWarningEl) {
+      if (result.isDacRisk) {
+        dacWarningEl.textContent = '⚠ Riesgo DAC: consumo bimestral elevado';
+        dacWarningEl.classList.remove('hidden');
+      } else {
+        dacWarningEl.textContent = '';
+        dacWarningEl.classList.add('hidden');
+      }
+    }
+  } catch (e) {
+    log(`⚠ Error: Cálculo de consumo: ${e.message}`, 'error');
+  }
+}
+
+// Tarjeta ENERGY
+let kwhSampleMs = 1000; 
+
+function startKwhTimer() {
+  if (!kwhTimerInterval) {
+    _scheduleKwhTick();
+  }
+}
+
+function _scheduleKwhTick() {
+  if (kwhTimerInterval) clearInterval(kwhTimerInterval);
+
+  kwhTimerInterval = setInterval(() => {
+    const deltaKwh = (lastPowerW * kwhSampleMs) / 3_600_000_000;
+    kwhTotal += deltaKwh;
+
+    $('kwh-session').textContent = kwhTotal.toFixed(4) + ' kWh';
+
+    const sessionCost = calculateTieredEnergyCost(kwhTotal);
+    const costSessionEl = $('cost-session');
+    if (costSessionEl) costSessionEl.textContent = '$' + sessionCost.totalCost.toFixed(4) + ' MXN';
+  }, kwhSampleMs);
+}
+
+function updateSessionTimerDisplay() {  
+  const el = $('kwh-time');
+  if (!el) return;
+  if (!periodStartTimeMs) { el.textContent = '00:00:00'; return; }
+  el.textContent = formatDurationMs(Date.now() - periodStartTimeMs);
+}
+
+function applySampleRate(segundos) {
+  const s = Math.max(1, parseInt(segundos) || 1);
+  kwhSampleMs = s * 1000;
+
+  if (kwhTimerInterval) {
+    _scheduleKwhTick();
+    log(`🛈 Frecuencia de actualización ajustada a ${s} s`, 'info');
+  }
+}
+
+// Tarjeta DIAGNOSIS
+function findRisingZeroCrossings(points) {
+  const crossings = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const y0 = points[i].y, y1 = points[i + 1].y;
+    if (y0 <= 0 && y1 > 0) {
+      const t0 = points[i].x, t1 = points[i + 1].x;
+      const frac = -y0 / (y1 - y0);
+      crossings.push(t0 + frac * (t1 - t0));
+    }
+  }
+  return crossings;
+}
+
+function averagePeriodMs(crossings) {
+  if (crossings.length < 2) return null;
+  let total = 0;
+  for (let i = 1; i < crossings.length; i++) total += crossings[i] - crossings[i - 1];
+  return total / (crossings.length - 1);
+}
+
+function matchCrossingDeltas(vCrossings, iCrossings) {
+  const deltas = [];
+  for (const vt of vCrossings) {
+    let nearest = null;
+    for (const it of iCrossings) {
+      const diff = it - vt;
+      if (nearest === null || Math.abs(diff) < Math.abs(nearest)) nearest = diff;
+    }
+    if (nearest !== null) deltas.push(nearest);
+  }
+  return deltas;
+}
+
+function analyzeLoadType(voltagePoints, currentPoints) {
+  const typeEl  = $('diagnosis-type');
+  const hintEl  = $('diagnosis-hint');
+  const dtEl    = $('diagnosis-dt');
+  const angleEl = $('diagnosis-angle');
+  const tsEl    = $('diagnosis-timestamp');
+  if (!typeEl) return;
+
+  const vCrossings = findRisingZeroCrossings(voltagePoints);
+  const iCrossings = findRisingZeroCrossings(currentPoints);
+
+  if (vCrossings.length < 2 || iCrossings.length < 1) {
+    typeEl.textContent = 'Datos insuficientes';
+    typeEl.style.color = 'var(--text-dim)';
+    hintEl.textContent = 'La captura fue muy corta o la corriente es demasiado baja para detectar el cruce por cero. Intenta de nuevo.';
+    dtEl.textContent = '--- ms';
+    angleEl.textContent = '---°';
+    return;
+  }
+
+  const periodMs = averagePeriodMs(vCrossings);
+  const deltas = matchCrossingDeltas(vCrossings, iCrossings);
+  deltas.sort((a, b) => a - b);
+
+  const mid = Math.floor(deltas.length / 2);
+  const dtMedian = deltas.length % 2 !== 0
+    ? deltas[mid]
+    : (deltas[mid - 1] + deltas[mid]) / 2;
+
+  const phaseDeg = (dtMedian / periodMs) * 360;
+  const THRESHOLD_DEG = 5; 
+
+  let tipo, color, detalle;
+  if (Math.abs(phaseDeg) < THRESHOLD_DEG) {
+    tipo = 'Carga Resistiva';
+    color = 'var(--text)';
+    detalle = 'La corriente está prácticamente en fase con el voltaje.';
+  } else if (phaseDeg > 0) {
+    tipo = 'Carga Inductiva';
+    color = 'var(--text)';
+    detalle = 'La corriente va atrasada respecto al voltaje.';
+  } else {
+    tipo = 'Carga Capacitiva';
+    color = 'var(--text)';
+    detalle = 'La corriente va adelantada respecto al voltaje.';
+  }
+
+  typeEl.textContent = tipo;
+  typeEl.style.color = color;
+  hintEl.textContent = detalle;
+  dtEl.textContent = Math.abs(dtMedian).toFixed(3) + ' ms';
+  angleEl.textContent = phaseDeg.toFixed(1) + '°';
+  tsEl.textContent = new Date().toLocaleTimeString('es-MX');
+}
+
+function showDiagnosisPlaceholder(hintMessage) {
+  const typeEl  = $('diagnosis-type');
+  const hintEl  = $('diagnosis-hint');
+  const dtEl    = $('diagnosis-dt');
+  const angleEl = $('diagnosis-angle');
+  const tsEl    = $('diagnosis-timestamp');
+  if (!typeEl) return;
+
+  typeEl.textContent = 'Sin datos';
+  typeEl.style.color = '';
+  hintEl.textContent = hintMessage;
+  dtEl.textContent = '--- ms';
+  angleEl.textContent = '---°';
+  tsEl.textContent = '--:--:--';
+}
+
+
+// ------------------------------------------------------------------
+// GRÁFICAS
+// ------------------------------------------------------------------
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function getStartTimeForRange(range) {
+  const todayStart = startOfToday();
+
+  if (range === 'hour') {
+    return Date.now() - (60 * 60 * 1000);
+  }
+
+  if (range === 'day') {
+    return todayStart;
+  }
+
+  if (range === 'week') {
+    return todayStart - (6 * 24 * 60 * 60 * 1000);
+  }
+
+  if (range === 'bimester') {
+    return todayStart - (8 * 7 * 24 * 60 * 60 * 1000);
+  }
+
+  return Date.now() - (60 * 60 * 1000);
+}
+
+function updateHourNavClock() {
+  if (powerChartRange !== 'hour') return;
+  const labelEl = $('powerChartNavLabel');
+  if (labelEl) labelEl.textContent = new Date().toLocaleTimeString('es-MX');
+}
+
+setInterval(updateHourNavClock, 1000);
+function startOfWeekMonday(ms) {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay(); 
+  const diff = (day === 0 ? -6 : 1) - day; 
+  d.setDate(d.getDate() + diff);
+  return d.getTime();
+}
+
+function getRangeBounds(range, offset = 0) {
+  const todayStart = startOfToday();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const nowMs = Date.now();
+
+  if (range === 'day') {
+    if (offset === 0) return { start: todayStart, end: nowMs };
+    const start = todayStart + offset * DAY_MS;
+    return { start, end: start + DAY_MS };
+  }
+
+  if (range === 'week') {
+    const currentWeekStart = startOfWeekMonday(nowMs);
+    if (offset === 0) return { start: currentWeekStart, end: nowMs };
+    const blockMs = 7 * DAY_MS;
+    const start = currentWeekStart + offset * blockMs;
+    return { start, end: start + blockMs };
+  }
+
+  const blockDays = 63;
+  const blockMs = blockDays * DAY_MS;
+  const currentBlockStart = todayStart - (blockDays - 1) * DAY_MS;
+  if (offset === 0) return { start: currentBlockStart, end: nowMs };
+  const start = currentBlockStart + offset * blockMs;
+  return { start, end: start + blockMs };
+}
+
+function formatRangeLabel(range, start, end) {
+  if (range === 'day') {
+    return new Date(start).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+  const startStr = new Date(start).toLocaleDateString('es-MX', { day: '2-digit', month: 'short' });
+  const endStr = new Date(end - 1).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' });
+  return `${startStr} — ${endStr}`;
+}
+
+// Gráfica WAVEFORMS
+function initWaveformChart() {
+  const canvas = $('waveformChart');
+  if (!canvas) return;
+
+  const ctx = canvas.getContext('2d');
+
+  waveformChart = new Chart(ctx, {
+    type: 'line',
+    plugins: [centeredXTitlePlugin],
+    data: {
+      datasets: [
+        {
+          label: 'Voltaje (V)',
+          data: [],
+          borderColor: rootStyles.getPropertyValue('--accent-v').trim(),
+          backgroundColor: hexToRgba(rootStyles.getPropertyValue('--accent-v').trim(), 0.25),
+          borderWidth: 2,
+          tension: 0,
+          pointRadius: 0,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Corriente (A)',
+          data: [],
+          borderColor: rootStyles.getPropertyValue('--accent-i').trim(),
+          backgroundColor: hexToRgba(rootStyles.getPropertyValue('--accent-i').trim(), 0.25),
+          borderWidth: 2,
+          tension: 0,
+          pointRadius: 0,
+          yAxisID: 'y1'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      parsing: false,
+      interaction: {
+        mode: 'nearest',
+        intersect: false
+      },
+      plugins: {
+        centeredXTitle: { text: 'Tiempo (ms)' },
+        legend: {
+          labels: {
+            color: '#e0e0e0',
+            font: {
+              family: 'Share Tech Mono'
+            }
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              if (context.dataset.label.includes('Voltaje')) {
+                return `${context.dataset.label}: ${context.parsed.y.toFixed(2)} V`;
+              }
+
+              return `${context.dataset.label}: ${context.parsed.y.toFixed(3)} A`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          title: {
+            display: true,
+            text: '',
+            color: '#e0e0e0',
+            font: {
+              family: 'Share Tech Mono',
+              size: 12
+            }
+          },
+          ticks: {
+            color: '#888888',
+            maxTicksLimit: 10
+          },
+          grid: {
+            color: '#2a2a2a'
+          }
+        },
+        y: {
+          type: 'linear',
+          position: 'left',
+          title: {
+            display: true,
+            text: 'Voltaje (V)',
+            color: '#e0e0e0',
+            font: {
+              family: 'Share Tech Mono',
+              size: 12
+            }
+          },
+          ticks: {
+            color: '#888888',
+            callback: value => value + ' V'
+          },
+          grid: {
+            color: '#2a2a2a'
+          }
+        },
+        y1: {
+          type: 'linear',
+          position: 'right',
+          title: {
+            display: true,
+            text: 'Corriente (A)',
+            color: '#e0e0e0',
+            font: {
+              family: 'Share Tech Mono',
+              size: 12
+            }
+          },
+          ticks: {
+            color: '#888888',
+            callback: value => value.toFixed(2) + ' A'
+          },
+          grid: {
+            drawOnChartArea: false
+          }
+        }
+      }
+    }
+  });
+}
+
+function parseWaveformChunk(arrayBuffer) {
+  if (arrayBuffer.byteLength < WAVEFORM_HEADER_SIZE) {
+    throw new Error(`Chunk demasiado corto: ${arrayBuffer.byteLength} bytes`);
+  }
+
+  const view = new DataView(arrayBuffer);
+
+  const sequenceId     = view.getUint32(0, true);
+  const chunkIndex     = view.getUint16(12, true);
+  const chunkCount     = view.getUint16(14, true);
+  const sampleRateHz   = view.getUint16(16, true);
+  const totalSamples   = view.getUint16(18, true);
+  const samplesInChunk = view.getUint16(20, true);
+  const channels       = view.getUint8(22);
+  const format         = view.getUint8(23);
+
+  if (channels !== WAVEFORM_CHANNELS_EXPECTED) {
+    throw new Error(`Canales no soportados: ${channels}`);
+  }
+
+  if (format !== WAVEFORM_FORMAT_I16_SCALED) {
+    throw new Error(`Formato de waveform no soportado: ${format}`);
+  }
+
+  const expectedBytes = WAVEFORM_HEADER_SIZE + samplesInChunk * channels * 2;
+  if (arrayBuffer.byteLength < expectedBytes) {
+    throw new Error(`Chunk incompleto: recibidos ${arrayBuffer.byteLength} bytes, esperados ${expectedBytes}`);
+  }
+
+  const voltage = new Array(samplesInChunk);
+  const current = new Array(samplesInChunk);
+
+  let offset = WAVEFORM_HEADER_SIZE;
+  for (let i = 0; i < samplesInChunk; i++) {
+    voltage[i] = view.getInt16(offset, true) / VOLTAGE_SCALE;
+    offset += 2;
+    current[i] = view.getInt16(offset, true) / CURRENT_SCALE;
+    offset += 2;
+  }
+
+  return {
+    sequenceId,
+    chunkIndex,
+    chunkCount,
+    sampleRateHz,
+    totalSamples,
+    samplesInChunk,
+    voltage,
+    current
+  };
+}
+
+function handleWaveformChunk(chunk) {
+  let sequence = waveformSequences.get(chunk.sequenceId);
+
+  if (!sequence) {
+    sequence = {
+      sequenceId:   chunk.sequenceId,
+      chunkCount:   chunk.chunkCount,
+      receivedCount: 0,
+      sampleRateHz: chunk.sampleRateHz,
+      totalSamples: chunk.totalSamples,
+      chunks:       new Array(chunk.chunkCount)
+    };
+    waveformSequences.set(chunk.sequenceId, sequence);
+
+    if (waveformSequences.size > 8) {
+      const oldestKey = waveformSequences.keys().next().value;
+      waveformSequences.delete(oldestKey);
+    }
+  }
+
+  if (!sequence.chunks[chunk.chunkIndex]) {
+    sequence.chunks[chunk.chunkIndex] = chunk;
+    sequence.receivedCount++;
+  }
+
+  if (sequence.receivedCount === sequence.chunkCount) {
+    renderWaveformSequence(sequence, pendingWaveformMode);
+    waveformSequences.delete(chunk.sequenceId);
+    pendingWaveformMode = 'manual';
+  }
+}
+
+
+
+function renderWaveformSequence(sequence, mode = 'manual') {
+  const voltagePoints = [];
+  const currentPoints = [];
+
+  try {
+    let sampleIndex = 0;
+    const dtMs = 1000.0 / sequence.sampleRateHz;
+
+    for (let chunkIndex = 0; chunkIndex < sequence.chunkCount; chunkIndex++) {
+      const chunk = sequence.chunks[chunkIndex];
+
+      if (!chunk) {
+        throw new Error(`falta chunk ${chunkIndex} (seq=${sequence.sequenceId})`);
+      }
+
+      for (let i = 0; i < chunk.samplesInChunk; i++) {
+        const tMs = sampleIndex * dtMs;
+        voltagePoints.push({ x: tMs, y: chunk.voltage[i] });
+        currentPoints.push({ x: tMs, y: chunk.current[i] });
+        sampleIndex++;
+      }
+    }
+  } catch (e) {
+    log(`⚠ Error: [Procesamiento] Gráfica (WAVEFORMS): ${e.message}`, 'error');
+    return;
+  }
+
+  if (mode !== 'silent') {
+    waveformChart.data.datasets[0].data = voltagePoints;
+    waveformChart.data.datasets[1].data = currentPoints;
+
+    if (currentPoints.length > 0) {
+      const rawMax = Math.max(...currentPoints.map(p => Math.abs(p.y)));
+      const axisMax = Math.max(0.1, rawMax * 1.15);
+      waveformChart.options.scales.y1.min = -axisMax;
+      waveformChart.options.scales.y1.max =  axisMax;
+    }
+
+    waveformChart.update('none');
+
+    const statusEl = $('waveformStatus');
+    if (statusEl) {
+      statusEl.textContent =
+        `Captura completa · 60.00 Hz · Última actualización: ${new Date().toLocaleTimeString('es-MX')}`;
+    }
+
+    log(`☑ Gráfica actualizada (WAVEFORMS).`, 'success');
+  }
+
+  if (mode !== 'manual') {
+    log(`🛈 Diagnóstico ejecutado`, 'success');
+    analyzeLoadType(voltagePoints, currentPoints);
+  }
+}
+
+// Gráfica HARMONICS
 const thdBadgePlugin = {
   id: 'thdBadge',
   afterDraw(chart) {
@@ -2326,163 +2824,6 @@ function updateHarmonicChart(harmonics) {
   harmonicChart.update();
 }
 
-// ------------------------------------------------------------------
-// Costo de energía por tarifa CFE (cálculo escalonado por bloques)
-// ------------------------------------------------------------------
-function calculateTieredEnergyCost(kwh) {
-  const tariff = CFE_TARIFFS[selectedTariffCode] || CFE_TARIFFS['1C'];
-  const season = getCurrentSeason(tariff);
-  const blocks = tariff[season].blocks;
-
-  let remainingKwh = Math.max(0, Number(kwh) || 0);
-  let totalCost = 0;
-  const details = [];
-
-  blocks.forEach(block => {
-    if (remainingKwh <= 0) return;
-
-    const blockKwh = Math.min(remainingKwh, block.limitKwh);
-    const blockCost = blockKwh * block.price;
-
-    details.push({
-      label: block.label,
-      kwh: blockKwh,
-      price: block.price,
-      cost: blockCost
-    });
-
-    totalCost += blockCost;
-    remainingKwh -= blockKwh;
-  });
-
-  return {
-    totalCost,
-    details,
-    season,
-    isDacRisk: kwh >= tariff.dacLimitKwhPerMonth
-  };
-}
-
-let energyPeriodRange = 'bimester';
-
-window.setEnergyPeriodRange = function (range) {
-  energyPeriodRange = range;
-  updateEnergyCost();
-};
-
-// Calcula el costo de un RANGO de kWh dentro de la progresión de bloques
-// (ej. del kWh 180 al 210 del bimestre), en vez de siempre desde 0.
-function calculateTieredEnergyCostRange(startKwh, endKwh, tariff, season) {
-  const blocks = tariff[season].blocks;
-  let cursor = 0;
-  let totalCost = 0;
-  const details = [];
-
-  blocks.forEach(block => {
-    const blockStart = cursor;
-    const blockEnd = cursor + block.limitKwh;
-
-    const overlapStart = Math.max(startKwh, blockStart);
-    const overlapEnd = Math.min(endKwh, blockEnd);
-    const overlapKwh = Math.max(0, overlapEnd - overlapStart);
-
-    if (overlapKwh > 0) {
-      const blockCost = overlapKwh * block.price;
-      details.push({ label: block.label, kwh: overlapKwh, price: block.price, cost: blockCost });
-      totalCost += blockCost;
-    }
-
-    cursor = blockEnd;
-  });
-
-  return { totalCost, details };
-}
-
-async function updateEnergyCost() {
-  const bimesterStartIso = getIsoStartForRange('bimester');
-  const periodStartMs = getStartTimeForRange(energyPeriodRange);
-  const pageSize = 1000;
-  let allRows = [];
-  let offset = 0;
-
-  try {
-    while (true) {
-      const { data, error } = await db
-        .from('consumption_points')
-        .select('created_at, energy_kwh')
-        .gte('created_at', bimesterStartIso)
-        .order('created_at', { ascending: true })
-        .range(offset, offset + pageSize - 1);
-
-      if (error) {
-        return;
-      }
-
-      if (!data || data.length === 0) break;
-      allRows = allRows.concat(data);
-      if (data.length < pageSize) break;
-      offset += pageSize;
-    }
-
-    const bimesterKwh = allRows.reduce((total, item) => total + Number(item.energy_kwh || 0), 0);
-
-    // kWh del periodo seleccionado (subconjunto del bimestre)
-    const periodKwh = energyPeriodRange === 'bimester'
-      ? bimesterKwh
-      : allRows
-          .filter(item => new Date(item.created_at).getTime() >= periodStartMs)
-          .reduce((total, item) => total + Number(item.energy_kwh || 0), 0);
-
-    const tariff = CFE_TARIFFS[selectedTariffCode] || CFE_TARIFFS['1C'];
-    const season = getCurrentSeason(tariff);
-
-    // Costo marginal real: el rango [antes del periodo, bimestre total]
-    const baseKwh = Math.max(0, bimesterKwh - periodKwh);
-    const result = calculateTieredEnergyCostRange(baseKwh, bimesterKwh, tariff, season);
-    result.season = season;
-    result.isDacRisk = bimesterKwh >= tariff.dacLimitKwhPerMonth; // el riesgo DAC siempre es del bimestre completo
-
-    const costEl = $('val-cost');
-    const costTariffEl = $('cost-tariff');
-    const costBlockEl = $('cost-block');
-    const costBreakdownEl = $('cost-breakdown');
-    const dacWarningEl = $('dac-warning');
-    const valKwhEl = $('val-kwh');
-
-    if (valKwhEl) valKwhEl.textContent = periodKwh.toFixed(4);
-    if (costEl) costEl.textContent = '$' + result.totalCost.toFixed(4);
-    if (tariffSelectCtrl) tariffSelectCtrl.setValue(selectedTariffCode);
-
-    if (costBlockEl) {
-      const lastBlock = result.details[result.details.length - 1];
-      costBlockEl.textContent = lastBlock ? lastBlock.label : 'Sin consumo';
-    }
-
-    if (costBreakdownEl) {
-      if (result.details.length === 0) {
-        costBreakdownEl.textContent = 'Sin consumo registrado en este periodo.';
-      } else {
-        const seasonLabel = result.season === 'verano' ? '☀ Temporada de verano' : '❄ Temporada de invierno';
-        const lines = result.details
-          .map(item => `${item.label}: ${item.kwh.toFixed(4)} kWh × $${item.price.toFixed(4)} = $${item.cost.toFixed(4)}`);
-        costBreakdownEl.innerHTML = `<strong>${seasonLabel}</strong><br>` + lines.join('<br>');
-      }
-    }
-
-    if (dacWarningEl) {
-      if (result.isDacRisk) {
-        dacWarningEl.textContent = '⚠ Riesgo DAC: consumo bimestral elevado';
-        dacWarningEl.classList.remove('hidden');
-      } else {
-        dacWarningEl.textContent = '';
-        dacWarningEl.classList.add('hidden');
-      }
-    }
-  } catch (e) {
-    log(`⚠ Error: Cálculo de consumo: ${e.message}`, 'error');
-  }
-}
-
 const centeredXTitlePlugin = {
   id: 'centeredXTitle',
   afterDraw(chart) {
@@ -2499,9 +2840,7 @@ const centeredXTitlePlugin = {
   }
 };
 
-// ------------------------------------------------------------------
-// Gráfica de Potencia Activa
-// ------------------------------------------------------------------
+// Gráfica POWER
 function initPowerChart() {
   const canvas = $('powerChart');
   if (!canvas) return;
@@ -2598,8 +2937,6 @@ function updatePowerChart(powerValue) {
   const now = new Date();
 
   lastPowerW = Number(powerValue);
-  const kwhPowerEl = $('kwh-power');
-  if (kwhPowerEl) kwhPowerEl.textContent = lastPowerW.toFixed(1) + ' W';
 
   if (!powerChart) return;
 
@@ -2607,19 +2944,16 @@ function updatePowerChart(powerValue) {
   const value = Number(lastPowerW.toFixed(2));
 
   if (powerChartFillCount < 60) {
-    // Fase de llenado: coloca el punto en la siguiente posición vacía (izquierda → derecha)
     powerChartLabels[powerChartFillCount] = label;
     powerChartData[powerChartFillCount] = value;
     powerChartFillCount++;
   } else {
-    // Ya está llena: se recorre — sale la más vieja por la izquierda, entra la nueva por la derecha
     powerChartLabels.shift();
     powerChartLabels.push(label);
     powerChartData.shift();
     powerChartData.push(value);
   }
 
-  // Solo actualizar la gráfica visualmente si estamos en la pestaña "hora"
   if (powerChartRange === 'hour') {
     powerChart.data.labels = powerChartLabels;
     powerChart.data.datasets[0].data = powerChartData;
@@ -2627,11 +2961,7 @@ function updatePowerChart(powerValue) {
   }
 }
 
-// ------------------------------------------------------------------
-// Triángulo de potencia (SVG)
-// ------------------------------------------------------------------
 function toReadableAngle(deg) {
-  // Normaliza a (-90, 90] para que el texto rotado nunca quede "de cabeza"
   let a = ((deg % 180) + 180) % 180;
   if (a > 90) a -= 180;
   return a;
@@ -2649,7 +2979,7 @@ function updatePowerTriangle(p, q, s) {
   const originY = 220;
   const maxWidth  = 170;
   const maxHeight = 160;
-  const MIN_VISIBLE = 0.05; // por debajo de esto, se considera "cero" y se oculta la etiqueta
+  const MIN_VISIBLE = 0.05; 
 
   const maxVal = Math.max(pAbs, qAbs, 1);
   const scale  = Math.min(maxWidth / maxVal, maxHeight / maxVal);
@@ -2676,7 +3006,6 @@ function updatePowerTriangle(p, q, s) {
   $('triangle-s-line').setAttribute('x2', qx);
   $('triangle-s-line').setAttribute('y2', qy);
 
-  // --- Etiqueta P: paralela a su línea (horizontal) ---
   const pLabel = $('triangle-p-label');
   if (pAbs < MIN_VISIBLE) {
     pLabel.style.opacity = 0;
@@ -2690,7 +3019,6 @@ function updatePowerTriangle(p, q, s) {
     pLabel.textContent = `P = ${pAbs.toFixed(1)} W`;
   }
 
-  // --- Etiqueta Q: paralela a su línea (vertical) ---
   const qLabel = $('triangle-q-label');
   if (qAbs < MIN_VISIBLE) {
     qLabel.style.opacity = 0;
@@ -2704,7 +3032,6 @@ function updatePowerTriangle(p, q, s) {
     qLabel.textContent = `Q = ${qAbs.toFixed(1)} VAR`;
   }
 
-  // --- Etiqueta S: paralela a la hipotenusa (ángulo dinámico) ---
   const sLabel = $('triangle-s-label');
   if (sAbs < MIN_VISIBLE) {
     sLabel.style.opacity = 0;
@@ -2720,10 +3047,10 @@ function updatePowerTriangle(p, q, s) {
     const candB = { x: midX - nx * offset, y: midY - ny * offset };
     const distA = Math.hypot(candA.x - originX, candA.y - originY);
     const distB = Math.hypot(candB.x - originX, candB.y - originY);
-    const sPos  = distA > distB ? candA : candB; // el punto que queda fuera del triángulo
+    const sPos  = distA > distB ? candA : candB; 
 
     const lineAngleDeg = Math.atan2(dy, dx) * 180 / Math.PI;
-    const sAngle = toReadableAngle(lineAngleDeg); // paralelo a la línea, no +90
+    const sAngle = toReadableAngle(lineAngleDeg); 
 
     sLabel.setAttribute('x', sPos.x);
     sLabel.setAttribute('y', sPos.y);
@@ -2731,7 +3058,6 @@ function updatePowerTriangle(p, q, s) {
     sLabel.textContent = `S = ${sAbs.toFixed(1)} VA`;
   }
 
-  // --- Ángulo φ ---
   const phiLabel = $('triangle-angle-label');
   if (sAbs < MIN_VISIBLE) {
     phiLabel.style.opacity = 0;
@@ -2744,50 +3070,6 @@ function updatePowerTriangle(p, q, s) {
   }
 }
 
-// ------------------------------------------------------------------
-// Eficiencia energética
-// ------------------------------------------------------------------
-function updateEfficiency(p, s) {
-  const el = $('val-efficiency');
-  if (!el) return;
-
-  const pAbs = Math.abs(p);
-  const sAbs = Math.abs(s);
-  const eff  = sAbs > 0 ? Math.min(100, (pAbs / sAbs) * 100) : 0;
-
-  el.textContent = eff.toFixed(2);
-  updateEfficiencyArc(eff);
-}
-
-function updateEfficiencyArc(eff) {
-  const arcLen = 125.5;
-  const filled = Math.min(1, Math.max(0, eff / 100)) * arcLen;
-  const arcEl  = $('efficiency-arc-fill');
-  if (!arcEl) return;
-
-  let level, label;
-  if      (eff === 0) { level = 'off';    label = '—'; }
-  else if (eff >= 95) { level = 'good';   label = 'EXCELENTE'; }
-  else if (eff >= 75) { level = 'warn';   label = 'BUENA'; }
-  else if (eff >= 50) { level = 'alert';  label = 'REGULAR'; }
-  else                { level = 'danger'; label = 'BAJA'; }
-
-  const color = STATUS_COLORS[level];
-  arcEl.setAttribute('stroke-dasharray', `${filled} ${arcLen}`);
-  arcEl.setAttribute('stroke', color);
-
-  const ratingEl = $('efficiency-rating');
-  if (ratingEl) {
-    ratingEl.textContent = label;
-    ratingEl.style.color = color;
-  }
-
-  setCardStatusColor('card-efficiency', level);
-}
-
-// ------------------------------------------------------------------
-// Utilidades de agregación de históricos (Supabase → buckets de gráfica)
-// ------------------------------------------------------------------
 function getIsoStartForRange(range) {
   const startTime = getStartTimeForRange(range);
   return new Date(startTime).toISOString();
@@ -2910,12 +3192,10 @@ window.navigatePowerChart = function (direction) {
 };
 
 function updatePowerChartButtons(activeRange) {
-  // Acotar al primer panel de gráfica (potencia activa) para no afectar
-  // los botones de consumo que comparten la clase chart-range-btn
   const powerPanel = document.querySelector('#powerChart')?.closest('.chart-panel');
   const buttons = powerPanel
     ? powerPanel.querySelectorAll('.chart-range-btn')
-    : document.querySelectorAll('.chart-range-btn[data-range]');   // fallback seguro
+    : document.querySelectorAll('.chart-range-btn[data-range]');   
 
   buttons.forEach(btn => {
     if (btn.dataset.range === activeRange) {
@@ -2930,9 +3210,7 @@ window.setPowerChartRange = function (range) {
   renderPowerChartByRange(range, 0);
 };
 
-// ------------------------------------------------------------------
-// Gráfica de Consumo de Energía
-// ------------------------------------------------------------------
+// Gráfica CONSUME
 function initConsumptionChart() {
   const canvas = $('consumptionChart');
   if (!canvas) return;
@@ -3007,7 +3285,7 @@ function initConsumptionChart() {
         y: {
           beginAtZero: true,
           afterFit: function(scaleInstance) {
-            scaleInstance.width = 95; // ancho fijo, así el área de la gráfica nunca se mueve
+            scaleInstance.width = 95; 
           },
           title: {
             display: true,
@@ -3135,287 +3413,6 @@ window.setConsumptionChartRange = function (range) {
   renderConsumptionChartByRange(range, 0);
 };
 
-
-// ------------------------------------------------------------------
-// Actualización general del dashboard (tarjetas en vivo)
-// ------------------------------------------------------------------
-function updateDashboard(d) {
-  if (d.v !== undefined) {
-    setVal('v', d.v, 2, 'V');
-    setBar('bar-v', d.v, LIMITS.v);
-  }
-  if (d.i !== undefined) {
-    setVal('i', d.i, 2, 'A');
-    setBar('bar-i', d.i, LIMITS.i);
-  }
-  if (d.p_activa !== undefined) {
-    setVal('pa', d.p_activa, 1, 'W');
-    lastPowerW = parseFloat(d.p_activa);
-    trianglePa = lastPowerW;
-    const _kwhPow1 = $('kwh-power'); if (_kwhPow1) _kwhPow1.textContent = lastPowerW.toFixed(1) + ' W';
-
-    updatePowerChart(lastPowerW);
-  }
-  if (d.p_aparente !== undefined) { setVal('pap', d.p_aparente, 1, 'VA'); trianglePap = parseFloat(d.p_aparente); }
-  if (d.p_reactiva !== undefined) { setVal('pr',  d.p_reactiva, 1, 'VAR'); trianglePr = parseFloat(d.p_reactiva); }
-
-  updatePowerTriangle(trianglePa, trianglePr, trianglePap);
-  updateEfficiency(trianglePa, trianglePap);
-
-  if (d.fp         !== undefined) { setVal('fp', d.fp, 2, ''); updateFpArc(d.fp); }
-  if (d.thd        !== undefined) { setVal('thd', d.thd, 2, '%'); updateThdBars(d.thd); updateThdStatus(d.thd); }
-  if (d.fault_flags !== undefined) {
-    processFaultFlags(d.fault_flags);
-  }
-  
-}
-
-// ------------------------------------------------------------------
-// Helpers de actualización de tarjetas
-// ------------------------------------------------------------------
-function setVal(key, value, decimals, unit) {
-  const el = els[key];
-  if (!el) return;
-  el.textContent = parseFloat(value).toFixed(decimals);
-
-  const unitEl = el.parentElement.querySelector('.card-unit');
-  if (unitEl && unit) unitEl.textContent = unit;
-}
-
-function setBar(barId, value, max) {
-  const pct = Math.min(100, Math.max(0, (value / max) * 100));
-  $(barId).style.width = pct + '%';
-}
-
-const LIVE_CARD_IDS = ['card-v', 'card-i', 'card-kwh', 'card-cost', 'card-power', 'card-diagnosis', 'card-fp', 'card-thd', 'card-efficiency'];
-
-function setSystemOffline() {
-  LIVE_CARD_IDS.forEach(id => setCardStatusColor(id, 'off'));
-
-  const barV = $('bar-v');
-  const barI = $('bar-i');
-  if (barV) barV.style.width = '0%';
-  if (barI) barI.style.width = '0%';
-
-  resetArc('fp-arc-fill', 'fp-rating');
-  resetArc('thd-arc-fill', 'thd-rating');
-  resetArc('efficiency-arc-fill', 'efficiency-rating');
-
-  trianglePa = 0;
-  trianglePap = 0;
-  trianglePr = 0;
-  updatePowerTriangle(0, 0, 0);
-
-  const offBtn  = $('noLoadOff');
-  const keepBtn = $('noLoadKeep');
-  if (offBtn)  offBtn.classList.remove('active');
-  if (keepBtn) keepBtn.classList.remove('active');
-
-  const onoffBtnEl = $('onoffBtn');
-  if (onoffBtnEl) {
-    onoffBtnEl.className = 'onoff-btn onoff-unknown';
-    const iconEl = $('onoffIcon');
-    const textEl = $('onoffText');
-    const hintEl = $('onoffHint');
-    if (iconEl) iconEl.textContent = '●';
-    if (textEl) textEl.textContent = '—';
-    if (hintEl) hintEl.textContent = 'Esperando conexión…';
-  }
-}
-
-function setSystemOnline() {
-  LIVE_CARD_IDS.forEach(id => {
-    const card = document.getElementById(id);
-    if (card) card.style.removeProperty('--status-color');
-  });
-}
-
-const rootStyles = getComputedStyle(document.documentElement);
-
-// ------------------------------------------------------------------
-// Utilidades de color (variables CSS → Canvas / Chart.js)
-// ------------------------------------------------------------------
-function hexToRgba(hex, alpha) {
-  const h = hex.trim().replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-function blendHexOverBg(hex, alpha, bgHex = '#050505') {
-  const c  = hex.trim().replace('#', '');
-  const bg = bgHex.replace('#', '');
-  const r = parseInt(c.substring(0, 2), 16), g = parseInt(c.substring(2, 4), 16), b = parseInt(c.substring(4, 6), 16);
-  const br = parseInt(bg.substring(0, 2), 16), bgn = parseInt(bg.substring(2, 4), 16), bb = parseInt(bg.substring(4, 6), 16);
-  const rr = Math.round(alpha * r + (1 - alpha) * br);
-  const rg = Math.round(alpha * g + (1 - alpha) * bgn);
-  const rb = Math.round(alpha * b + (1 - alpha) * bb);
-  return `rgb(${rr}, ${rg}, ${rb})`;
-}
-
-const STATUS_COLORS = {
-  off:    rootStyles.getPropertyValue('--status-off').trim(),
-  good:   rootStyles.getPropertyValue('--status-good').trim(),
-  warn:   rootStyles.getPropertyValue('--status-warn').trim(),
-  alert:  rootStyles.getPropertyValue('--status-alert').trim(),
-  danger: rootStyles.getPropertyValue('--status-danger').trim(),
-};
-
-function setCardStatusColor(cardId, level) {
-  const card = document.getElementById(cardId);
-  if (!card) return;
-  card.style.setProperty('--status-color', STATUS_COLORS[level] || STATUS_COLORS.off);
-}
-
-function updateFpArc(fp) {
-  const arcLen = 125.5;
-  const filled = Math.min(1, Math.max(0, fp)) * arcLen;
-  const arcEl  = $('fp-arc-fill');
-  arcEl.setAttribute('stroke-dasharray', `${filled} ${arcLen}`);
-
-  let level, label;
-  if      (fp === 0)   { level = 'off';    label = '—'; }
-  else if (fp >= 0.95) { level = 'good';   label = 'EXCELENTE'; }
-  else if (fp >= 0.75) { level = 'warn';   label = 'BUENO'; }
-  else if (fp >= 0.50) { level = 'alert';  label = 'REGULAR'; }
-  else                 { level = 'danger'; label = 'BAJO'; }
-
-  const color = STATUS_COLORS[level];
-  arcEl.setAttribute('stroke', color);
-  $('fp-rating').textContent = label;
-  $('fp-rating').style.color = color;
-  setCardStatusColor('card-fp', level);
-}
-
-function resetArc(arcId, ratingId) {
-  const arcEl = $(arcId);
-  if (arcEl) {
-    arcEl.setAttribute('stroke-dasharray', '0 125.5');
-    arcEl.setAttribute('stroke', STATUS_COLORS.off);
-  }
-  const ratingEl = $(ratingId);
-  if (ratingEl) {
-    ratingEl.textContent = '—';
-    ratingEl.style.color = STATUS_COLORS.off;
-  }
-}
-
-function updateThdStatus(thd) {
-  let level, label;
-  if      (thd === 0) { level = 'off';    label = '—'; }
-  else if (thd < 25)  { level = 'good';   label = 'BAJO'; }
-  else if (thd < 50)  { level = 'warn';   label = 'MODERADO'; }
-  else if (thd < 75)  { level = 'alert';  label = 'ALTO'; }
-  else                 { level = 'danger'; label = 'CRÍTICO'; }
-
-  const color  = STATUS_COLORS[level];
-  const arcLen = 125.5;
-  // Capado en 100%: valores mayores llenan el arco completo, no se salen.
-  const filled = Math.min(1, Math.max(0, thd / 100)) * arcLen;
-  const arcEl  = $('thd-arc-fill');
-  if (arcEl) {
-    arcEl.setAttribute('stroke-dasharray', `${filled} ${arcLen}`);
-    arcEl.setAttribute('stroke', color);
-  }
-  const ratingEl = $('thd-rating');
-  if (ratingEl) {
-    ratingEl.textContent = label;
-    ratingEl.style.color = color;
-  }
-
-  setCardStatusColor('card-thd', level);
-}
-
-function updateThdBars(thd) {
-  const bars = document.querySelectorAll('.hbar');
-  const harmonics = [100, thd * 6, thd * 4, thd * 2.5, thd * 1.5, thd, thd * 0.5];
-  bars.forEach((bar, i) => {
-    bar.style.height = Math.min(100, harmonics[i] || 2) + '%';
-  });
-}
-
-// ------------------------------------------------------------------
-// Acumulador kWh
-// El timer corre al mismo ritmo que el muestreo del ESP32 para evitar
-// oscilaciones cuando el intervalo es mayor a 1 segundo.
-// ------------------------------------------------------------------
-let kwhSampleMs = 1000;   // Intervalo de muestreo actual en ms (se actualiza con sendSampleRate)
-
-function startKwhTimer() {
-  if (!kwhTimerInterval) {
-    _scheduleKwhTick();
-  }
-}
-
-function _scheduleKwhTick() {
-  if (kwhTimerInterval) clearInterval(kwhTimerInterval);
-
-  kwhTimerInterval = setInterval(() => {
-    const deltaKwh = (lastPowerW * kwhSampleMs) / 3_600_000_000;
-    kwhTotal += deltaKwh;
-
-    $('kwh-session').textContent = kwhTotal.toFixed(4) + ' kWh';
-    const _kwhPow2 = $('kwh-power'); if (_kwhPow2) _kwhPow2.textContent = lastPowerW.toFixed(1) + ' W';
-
-    const sessionCost = calculateTieredEnergyCost(kwhTotal);
-    const costSessionEl = $('cost-session');
-    if (costSessionEl) costSessionEl.textContent = '$' + sessionCost.totalCost.toFixed(4) + ' MXN';
-  }, kwhSampleMs);
-}
-
-function updateSessionTimerDisplay() {  
-  const el = $('kwh-time');
-  if (!el) return;
-  if (!periodStartTimeMs) { el.textContent = '00:00:00'; return; }
-  el.textContent = formatDurationMs(Date.now() - periodStartTimeMs);
-}
-
-// Llamar esto cuando el usuario cambia el tiempo de muestreo
-// (después de sendSampleRate) para sincronizar el timer y el watchdog
-function applySampleRate(segundos) {
-  const s = Math.max(1, parseInt(segundos) || 1);
-  kwhSampleMs = s * 1000;
-
-  // Reiniciar el timer con el nuevo intervalo si ya está corriendo
-  if (kwhTimerInterval) {
-    _scheduleKwhTick();
-    log(`🛈 Frecuencia de actualización ajustada a ${s} s`, 'info');
-  }
-
-  // El watchdog dinámico se actualiza automáticamente en el siguiente mensaje
-  // recibido desde el ESP32 (usa sampleRate.value en tiempo real)
-}
-
-window.resetKwh = function () {
-  if (publishControl('control/reset_sesion', '1')) {
-    log('⚠ Alerta: Sesión reseteada.', 'warn');
-  }
-};
-
-window.resetDiagnosis = function () {
-  if (requestDiagnosisWaveform()) {
-    showDiagnosisPlaceholder('Solicitando nueva captura...');
-    log('⚠ Alerta: Diagnóstico reseteado.', 'warn');
-  }
-};
-
-function showDiagnosisPlaceholder(hintMessage) {
-  const typeEl  = $('diagnosis-type');
-  const hintEl  = $('diagnosis-hint');
-  const dtEl    = $('diagnosis-dt');
-  const angleEl = $('diagnosis-angle');
-  const tsEl    = $('diagnosis-timestamp');
-  if (!typeEl) return;
-
-  typeEl.textContent = 'Sin datos';
-  typeEl.style.color = '';
-  hintEl.textContent = hintMessage;
-  dtEl.textContent = '--- ms';
-  angleEl.textContent = '---°';
-  tsEl.textContent = '--:--:--';
-}
-
 function clearWaveformAndHarmonicsCharts() {
   if (waveformChart) {
     waveformChart.data.datasets[0].data = [];
@@ -3436,173 +3433,8 @@ function clearWaveformAndHarmonicsCharts() {
 
 
 // ------------------------------------------------------------------
-// Comandos del dispositivo
+// INICIALIZACIÓN
 // ------------------------------------------------------------------
-
-// Límite superior de potencia
-window.syncPowerLimit = function (val) {
-  let v = parseInt(val);
-  const minVal = parseInt($('powerLimitMin').value) || 0;
-  if (v < minVal) v = minVal; 
-  $('powerLimit').value       = v;
-  $('powerLimitSlider').value = v;
-};
-window.updatePowerLimitDisplay = function () {
-  let v = parseInt($('powerLimit').value);
-  if (isNaN(v)) v = 0;
-  v = Math.min(1200, Math.max(0, v));
-
-  const minVal = parseInt($('powerLimitMin').value) || 0;
-  if (v < minVal) v = minVal;
-
-  $('powerLimit').value       = v;
-  $('powerLimitSlider').value = Math.min(1200, v);
-};
-
-// Límite inferior de potencia
-window.syncPowerLimitMin = function (val) {
-  let v = parseInt(val);
-  const maxVal = parseInt($('powerLimit').value) || 1200;
-  if (v > maxVal) v = maxVal; 
-  $('powerLimitMin').value       = v;
-  $('powerLimitMinSlider').value = v;
-};
-window.updatePowerLimitMinDisplay = function () {
-  let v = parseInt($('powerLimitMin').value);
-  if (isNaN(v)) v = 0;
-  v = Math.min(1200, Math.max(0, v));
-
-  const maxVal = parseInt($('powerLimit').value) || 1200;
-  if (v > maxVal) v = maxVal;
-
-  $('powerLimitMin').value       = v;
-  $('powerLimitMinSlider').value = Math.min(1200, v);
-};
-
-// Tiempo de muestreo
-window.syncSampleRate = function (val) {
-  $('sampleRate').value = val;
-};
-window.updateSampleDisplay = function () {
-  let v = parseInt($('sampleRate').value);
-  if (isNaN(v)) v = 1;
-  v = Math.min(60, Math.max(1, v));
-  $('sampleRate').value   = v;
-  $('sampleSlider').value = Math.min(60, v);
-};
-
-// ------------------------------------------------------------------
-// Funciones para enviar comandos 
-// ------------------------------------------------------------------
-
-// 1. Comando de Control de Relé
-window.toggleRelay = function () {
-  const payload = relayOn ? 'OFF' : 'ON';
-  publishControl('control/rele', payload);
-};
-
-// 2. Comando de Control de Carga
-window.sendNoLoadAction = function (value) {
-  const label = value === 'OFF' ? 'Desconectar salida sin carga' : 'Mantener salida sin carga';
-  publishControl('control/no_load_action', value);
-};
-
-// 3. Comando de Límite Superior de Potencia
-window.sendPowerLimit = function () {
-  const rawValue = $('powerLimitSlider').value;
-  const limitValue = String(rawValue).padStart(4, '0');
-  publishControl('control/limite_potencia', limitValue);
-};
-
-// 4. Comando de Límite Inferior de Potencia
-window.sendPowerLimitMin = function () {
-  const rawValue = $('powerLimitMinSlider').value;
-  const limitValue = String(rawValue).padStart(4, '0');
-  publishControl('control/limite_potencia_min', limitValue);
-};
-
-// 5. Comando de Tiempo de Muestreo
-window.sendSampleRate = function () {
-  const sampleValue = $('sampleRate').value;
-  publishControl('control/tiempo_muestreo', sampleValue);
-  applySampleRate(sampleValue);
-};
-
-
-// ------------------------------------------------------------------
-// Estado de conexión
-// ------------------------------------------------------------------
-
-function setStatus(isConnected) {
-  const dot  = $('statusDot');
-  const text = $('statusText');
-  if (isConnected) {
-    dot.classList.add('connected');
-    text.textContent = 'Conectado';
-  } else {
-    dot.classList.remove('connected');
-    text.textContent = 'Desconectado';
-  }
-}
-
-// ------------------------------------------------------------------
-// Log de consola
-// ------------------------------------------------------------------
-
-function log(msg, type = 'info') {
-  const body = $('logBody');
-  const ts   = new Date().toLocaleTimeString('es-MX');
-  const line = document.createElement('div');
-  line.className = `log-line log-${type}`;
-  line.textContent = `[${ts}] ${msg}`;
-  body.appendChild(line);
-  body.scrollTop = body.scrollHeight;
-  while (body.children.length > 100) body.removeChild(body.firstChild);
-}
-
-window.clearLog = function () {
-  $('logBody').innerHTML = '';
-  log('🛈 Log borrado.', 'info');
-};
-
-// ------------------------------------------------------------------
-// Simulador (consola del navegador: startSim() / stopSim())
-// ------------------------------------------------------------------
-
-let simInterval = null;
-
-window.startSim = function (intervalMs = 1000) {
-  stopSim();
-  startKwhTimer();
-  log('▸ Simulador iniciado.', 'success');
-  simInterval = setInterval(() => {
-    const v   = +(120 + Math.random() * 10 - 5).toFixed(1);
-    const i   = +(2  + Math.random() * 0.5).toFixed(2);
-    const pa  = +(v * i * 0.9).toFixed(1);
-    const pap = +(v * i).toFixed(1);
-    const pr  = +(pa * 0.15).toFixed(1);
-    const fp  = +(pa / pap).toFixed(2);
-    const thd = +(4  + Math.random() * 1.5).toFixed(1);
-
-    const payload = { v, i, p_activa: pa, p_aparente: pap, p_reactiva: pr, fp, thd };
-    log(`[SIM] ${JSON.stringify(payload)}`, 'data');
-    updateDashboard(payload);
-    $('lastUpdate').textContent = new Date().toLocaleTimeString('es-MX');
-  }, intervalMs);
-};
-
-window.stopSim = function () {
-  if (simInterval) {
-    clearInterval(simInterval);
-    simInterval = null;
-    log('■ Simulador detenido.', 'error');
-  }
-};
-
-
-
-
-
 window.addEventListener('DOMContentLoaded', () => {
 
   setSystemOffline();

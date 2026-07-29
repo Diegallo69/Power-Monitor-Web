@@ -165,9 +165,6 @@ header h1 {
 
 /* ============================================================
    MAIN GRID — Layout de 3 columnas
-   Fila 1: Voltaje  | Corriente   | FP           
-   Fila 2: Costo    | kWh         | Eficiencia                  
-   Fila 3: Potencia | Diagnóstico | THD
    ============================================================ */
 
 main {
@@ -177,23 +174,23 @@ main {
   padding: 20px 28px;
 }
 
-/* Fila 1 — una columna cada tarjeta */
+/* Fila 1 */
 .card--voltage    { grid-column: 1 / 2; grid-row: 1; }
 .card--current    { grid-column: 2 / 3; grid-row: 1; }
 .card--fp         { grid-column: 3 / 4; grid-row: 1; }
 
-/* Fila 2 — THD ocupa 2 cols, kWh 1 col */
+/* Fila 2 */
 .card--cost       { grid-column: 1 / 2; grid-row: 2; height: 325px; }
 .card--kwh        { grid-column: 2 / 3; grid-row: 2; height: 325px; }
 .card--efficiency { grid-column: 3 / 4; grid-row: 2; height: 325px; }
 
 
-/* Fila 3 — potencia unificada, ocupa 1 sola columna */
+/* Fila 3 */
 .card--power      { grid-column: 1 / 2; grid-row: 3; height: 325px; }
 .card--diagnosis  { grid-column: 2 / 3; grid-row: 3; height: 325px; }
 .card--thd        { grid-column: 3 / 4; grid-row: 3; height: 325px; }
 
-/* Grid interno: 3 filas apiladas, mismo estilo visual para las 3 potencias */
+/* Grid interno */
 .power-card-inner {
   display: flex;
   flex-direction: row;
@@ -688,7 +685,7 @@ main {
   right: 0;
   min-width: 200px;
   max-width: 90vw;
-  max-height: 100px; /* ≈ 3 opciones visibles, el resto se desplaza */
+  max-height: 100px; 
   overflow-y: auto;
   background: var(--bg2);
   border: 1px solid var(--border2);
@@ -751,8 +748,6 @@ main {
   top: 50%;
   transform: translate(-50%, -50%);
 }
-
-.chart-nav.hidden { display: none; }
 
 .chart-nav.time-only .chart-nav-btn {
   visibility: hidden;
