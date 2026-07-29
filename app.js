@@ -2631,8 +2631,10 @@ const thdBadgePlugin = {
     const paddingX = 10;
     const boxHeight = 22;
     const boxWidth = ctx.measureText(text).width + paddingX * 2;
-    const x = chartArea.right - boxWidth - 90;
-    const y = chartArea.top + 37.5;
+
+    const margin = 5; 
+    const x = chartArea.right - boxWidth - margin;
+    const y = chartArea.top + margin;
 
     ctx.fillStyle = hexToRgba(accent, 0.12);
     ctx.strokeStyle = accent;
