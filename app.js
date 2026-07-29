@@ -572,6 +572,7 @@ function onMessageArrived(message) {
   else if (topic.match(/^smartcontact\/.+\/estado\/tiempo_muestreo$/)) {
   const v = parseInt(raw) || 1;
   $('sampleRate').value = v;
+  $('sampleSlider').value = Math.min(60, v);
   log(`🛈 Actualización: Tiempo de muestreo -> ${v} s`, 'info');
   } 
 
