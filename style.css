@@ -1223,7 +1223,7 @@ main {
   .card--efficiency { grid-column: 1; grid-row: 9; height: auto; }
 
   header { padding: 12px 16px; }
-  .config-bar { padding: 6px; }
+  .config-bar { padding: 14px; }
   .commands, .console, .chart-panel {
     margin-left: 14px;
     margin-right: 14px;
