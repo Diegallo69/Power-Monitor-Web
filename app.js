@@ -228,11 +228,7 @@ function disconnect() {
   connected = false;
   setStatus(false);
 
-  const btn = $('connectBtn');
-  if (btn) {
-    btn.textContent = 'Conectar';
-    btn.classList.remove('disconnect');
-  }
+
 
   setSystemOffline();
   log('⚠ Alerta: Desconectado manualmente.', 'warn');
@@ -280,9 +276,7 @@ function onConnected(topic) {
   client.subscribe('smartcontact/+/telemetria/armonicos');
   client.subscribe('smartcontact/+/telemetria/waveform');
 
-  const btn = $('connectBtn');
-  btn.textContent = 'Desconectar';
-  btn.classList.add('disconnect');
+
 
   setSystemOnline();
   updateEnergyCost();
@@ -304,9 +298,7 @@ function onConnectionLost(res) {
   setStatus(false);
   if (res.errorCode !== 0) 
     log(`⚠ Error: Conexión perdida: ${res.errorMessage}`, 'error');
-  const btn = $('connectBtn');
-  btn.textContent = 'Conectar';
-  btn.classList.remove('disconnect');
+
 
   setSystemOffline();
 
@@ -1444,7 +1436,7 @@ function showLatestAlert(faultFlags) {
 
   alertText.textContent = `${selectedFault.label}${extraText}`;
 
-  alertBox.classList.remove('hidden', 'warn', 'error');
+  alertBox.classList.remove('hidden', 'neutral', 'warn', 'error');
   alertBox.classList.add(selectedFault.severity === 'error' ? 'error' : 'warn');
 
   lastDisplayedFaultFlags = Number(faultFlags);
@@ -1461,8 +1453,9 @@ function scheduleHideLatestAlert() {
   }
 
   latestAlertTimeout = setTimeout(() => {
-    alertBox.classList.add('hidden');
-    alertText.textContent = '—';
+    alertBox.classList.remove('warn', 'error');
+    alertBox.classList.add('neutral');
+    alertText.textContent = '-';
     lastDisplayedFaultFlags = 0;
   }, 5000);
 }

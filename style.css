@@ -92,8 +92,28 @@ header h1 {
 .status-block {
   display: flex; align-items: center; gap: 8px;
   font-family: var(--mono); font-size: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  transition: border-color 0.25s, background 0.25s;
 }
-
+.status-block:hover {
+  border-color: var(--text-dim);
+  background: var(--bg3);
+}
+.status-block:has(.status-dot.connected) {
+  border-color: var(--accent-normal);
+}
+.status-block:has(.status-dot.connected):hover {
+  border-color: var(--accent-normal);
+  box-shadow: 0 0 10px var(--accent-normal)44;
+}
+.status-block:focus-visible {
+  outline: 1px solid var(--accent-normal);
+  outline-offset: 2px;
+}
 .status-dot {
   width: 10px; height: 10px;
   border-radius: 50%;
@@ -109,6 +129,8 @@ header h1 {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.5; }
 }
+
+
 
 .timestamp {
   font-family: var(--mono);
@@ -417,16 +439,15 @@ main {
   width: 100%;
   justify-content: space-between;
   background: #050505;
-  border: 1px solid var(--accent-alert);
-  border-left: 3px solid var(--accent-alert);
+  border: 1px solid var(--border2);
+  border-left: 3px solid var(--border2);
   color: var(--text);
   font-family: var(--mono);
   font-size: 0.72rem;
   padding: 8px 12px;
   border-radius: var(--radius);
   min-height: 34px;
-  box-shadow: 0 0 10px #ff6b3544;
-  animation: latestAlertPulse 1.2s infinite;
+  transition: border-color 0.25s, box-shadow 0.25s;
 }
 
 .latest-alert.hidden {
@@ -439,6 +460,10 @@ main {
   letter-spacing: 0.08em;
 }
 
+.latest-alert.neutral .latest-alert-text {
+  color: var(--text-dim);
+}
+
 .latest-alert-text {
   color: var(--accent-alert);
 }
@@ -447,6 +472,7 @@ main {
   border-color: var(--accent-warn);
   border-left-color: var(--accent-warn);
   box-shadow: 0 0 10px #ffcc0044;
+  animation: latestAlertPulse 1.2s infinite;
 }
 
 .latest-alert.warn .latest-alert-text {
@@ -457,6 +483,7 @@ main {
   border-color: var(--accent-alert);
   border-left-color: var(--accent-alert);
   box-shadow: 0 0 10px #ff6b3544;
+  animation: latestAlertPulse 1.2s infinite;
 }
 
 .latest-alert.error .latest-alert-text {
@@ -850,7 +877,7 @@ main {
 .cmd-label {
   font-family: var(--mono);
   font-size: 0.62rem;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.1em;
   color: var(--text-dim);
   text-transform: uppercase;
   margin-bottom: 2px;

@@ -23,7 +23,10 @@
       </div>
     </div>
     <div class="header-right">
-      <div class="status-block">
+      <div class="status-block" id="connectBtn" onclick="toggleConnection()"
+           role="button" tabindex="0"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleConnection();}"
+           aria-label="Conectar o desconectar del broker">
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">Desconectado</span>
       </div>
@@ -33,8 +36,7 @@
 
   <!-- BROKER CONFIG -->
   <div class="config-bar">
-    <button id="connectBtn" onclick="toggleConnection()">Conectar</button>
-    <div class="latest-alert hidden" id="latestAlert">
+    <div class="latest-alert neutral" id="latestAlert">
       <span class="latest-alert-label">Última alerta:</span>
       <span class="latest-alert-text" id="latestAlertText">—</span>
     </div>  
