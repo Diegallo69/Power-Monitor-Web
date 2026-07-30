@@ -1229,7 +1229,7 @@ main {
     margin-right: 14px;
   }
 
-  .power-combined-grid { flex: 0 0 42%; }
+  .power-combined-grid { flex: 0 0 50%; }
 
   /* Potencia / Consumo */
   .chart-header:has(.chart-nav) {
