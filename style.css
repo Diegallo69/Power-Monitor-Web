@@ -84,7 +84,7 @@ header h1 {
   font-family: var(--mono);
   font-size: 0.7rem;
   color: var(--text-dim);
-  letter-spacing: 0.12em;
+  letter-spacing: 0.05em;
 }
 
 .header-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
@@ -141,6 +141,8 @@ header h1 {
   cursor: pointer;
   box-shadow: 0 0 16px var(--accent-normal)88;
   transition: background 0.25s, box-shadow 0.25s, transform 0.1s;
+  width: 145px;
+  text-align: center;
 }
 .config-bar button:active { transform: scale(0.95); }
 
@@ -1065,6 +1067,7 @@ main {
 }
 .cmd-slider-wrap input[type="range"] {
   -webkit-appearance: none;
+  appearance: none;
   width: 100%;
   height: 4px;
   border-radius: 2px;
@@ -1072,6 +1075,7 @@ main {
   outline: none;
   cursor: pointer;
 }
+
 .cmd-slider-wrap input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 14px; height: 14px;
@@ -1081,6 +1085,18 @@ main {
   transition: transform 0.15s;
 }
 .cmd-slider-wrap input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.25); }
+
+.cmd-slider-wrap input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent-pwr);
+  box-shadow: 0 0 6px var(--accent-pwr);
+  transition: transform 0.15s;
+  cursor: pointer;
+}
+.cmd-slider-wrap input[type="range"]::-moz-range-thumb:hover { transform: scale(1.25); }
+
 .slider-labels {
   display: flex;
   justify-content: space-between;
