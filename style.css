@@ -148,44 +148,6 @@ header h1 {
   border-bottom: 1px solid var(--border);
 }
 
-.config-bar button {
-  background: var(--bg3);
-  color: var(--accent-normal);
-  border: 1px solid var(--accent-normal);
-  font-family: var(--sans);
-  font-weight: 700;
-  font-size: 0.8rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 8px 22px;
-  border-radius: var(--radius);
-  cursor: pointer;
-  box-shadow: 0 0 16px var(--accent-normal)88;
-  transition: background 0.25s, box-shadow 0.25s, transform 0.1s;
-  width: 145px;
-  text-align: center;
-}
-.config-bar button:active { transform: scale(0.95); }
-
-.config-bar button.disconnect {
-  background: var(--bg3);
-  color: var(--accent-alert);
-  border: 1px solid var(--accent-alert);
-  box-shadow: 0 0 10px var(--accent-alert)44;
-}
-
-.config-bar button:hover {
-  box-shadow: 0 0 26px var(--accent-normal)ee;
-  filter: brightness(1.5);
-  transform: scale(1.025);
-}
-
-.config-bar button.disconnect:hover {
-  box-shadow: 0 0 20px var(--accent-alert)aa;
-  filter: brightness(1.5);
-  transform: scale(1.025);
-}
-
 /* ============================================================
    MAIN GRID — Layout de 3 columnas
    ============================================================ */
@@ -1261,7 +1223,8 @@ main {
   .card--efficiency { grid-column: 1; grid-row: 9; height: auto; }
 
   header { padding: 12px 16px; }
-  .config-bar, .commands, .console, .chart-panel {
+  .config-bar { padding: 14px; }
+  .commands, .console, .chart-panel {
     margin-left: 14px;
     margin-right: 14px;
   }
