@@ -551,6 +551,7 @@ function onMessageArrived(message) {
       offBtn.classList.toggle('active', estadoNoLoad === 'OFF');
       keepBtn.classList.toggle('active', estadoNoLoad === 'KEEP');
     }
+    updateNoLoadTrigger(estadoNoLoad); 
     const estadoControlLoad = estadoNoLoad === 'KEEP' ? 'ON' : 'OFF';
     log(`🛈 Actualización: Control de carga -> ${estadoControlLoad}`, 'info');
   }
@@ -1185,6 +1186,44 @@ window.resetDiagnosis = function () {
   }
 };
 
+function updateNoLoadTrigger(state) {
+  const trigger = $('noLoadTrigger');
+  const icon    = $('noLoadTriggerIcon');
+  const text    = $('noLoadTriggerText');
+  const hint    = $('noLoadHint');
+  if (!trigger) return;
+
+  trigger.classList.remove('state-on', 'state-off', 'state-unknown');
+  if (state === 'KEEP') {
+    trigger.classList.add('state-on');
+    text.textContent = 'ON';
+    if (hint) hint.textContent = 'Sistema conectado';
+  } else if (state === 'OFF') {
+    trigger.classList.add('state-off');
+    text.textContent = 'OFF';
+    if (hint) hint.textContent = 'Sistema desconectado';
+  } else {
+    trigger.classList.add('state-unknown');
+    icon.textContent = '●';
+    text.textContent = '—';
+    if (hint) hint.textContent = 'Esperando conexión…';
+  }
+
+  const select = $('noLoadSelect');
+  if (select) select.classList.remove('open');
+}
+
+window.toggleNoLoadSelect = function () {
+  const select = $('noLoadSelect');
+  if (!select) return;
+  select.classList.toggle('open');
+};
+
+document.addEventListener('click', (e) => {
+  const select = $('noLoadSelect');
+  if (select && !select.contains(e.target)) select.classList.remove('open');
+});
+
 // Límite superior de potencia
 window.syncPowerLimit = function (val) {
   let v = parseFloat(val);
@@ -1246,6 +1285,7 @@ window.toggleRelay = function () {
 // 2. Comando de Control de Carga
 window.sendNoLoadAction = function (value) {
   publishControl('control/no_load_action', value);
+  updateNoLoadTrigger(value);
 };
 
 // 3. Comando de Límite Superior de Potencia
@@ -1651,6 +1691,7 @@ function setSystemOffline() {
   const keepBtn = $('noLoadKeep');
   if (offBtn)  offBtn.classList.remove('active');
   if (keepBtn) keepBtn.classList.remove('active');
+  updateNoLoadTrigger(null); 
 
   const onoffBtnEl = $('onoffBtn');
   if (onoffBtnEl) {

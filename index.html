@@ -340,33 +340,35 @@
     <div class="commands-header">▸ COMANDOS DEL DISPOSITIVO</div>
     <div class="commands-body">
 
-      <!-- ON/OFF -->
-      <div class="cmd-block cmd-block--onoff">
-        <div class="cmd-label">ESTADO DEL CONTACTO</div>
-        <button class="onoff-btn onoff-on" id="onoffBtn" onclick="toggleRelay()">
-          <span class="onoff-icon" id="onoffIcon">●</span>
-          <span id="onoffText">ON</span>
-        </button>
-        <div class="cmd-hint" id="onoffHint">Contacto energizado</div>
-      </div>
-
-      <div class="cmd-divider"></div>
-
-      <!-- Comportamiento sin carga -->
-      <div class="cmd-block">
-        <div class="cmd-label">COMPORTAMIENTO SIN CARGA</div>
-        <div class="cmd-hint" style="margin-bottom:10px">Al desconectar la carga, mantener el sistema:</div>
-        <div style="display:flex;gap:8px;justify-content:center">
-          <button id="noLoadKeep" class="cmd-send-btn"
-                  onclick="sendNoLoadAction('KEEP')"
-                  title="Mantener la salida encendida aunque no haya corriente">
-            ✔ Conectado
+      <div class="cmd-group">
+        <!-- Estado del relé -->
+        <div class="cmd-block cmd-block--onoff">
+          <div class="cmd-label">ESTADO DEL CONTACTO</div>
+          <button class="onoff-btn onoff-on" id="onoffBtn" onclick="toggleRelay()">
+            <span class="onoff-icon" id="onoffIcon">●</span>
+            <span id="onoffText">-</span>
           </button>
-          <button id="noLoadOff" class="cmd-send-btn"
-                  onclick="sendNoLoadAction('OFF')"
-                  title="Desconectar la salida si no hay corriente">
-            ✕ Desconectado
-          </button>
+          <div class="cmd-hint" id="onoffHint">Contacto energizado</div>
+        </div>
+
+        <div class="cmd-divider"></div>
+
+        <!-- Estado sin carga -->
+        <div class="cmd-block cmd-block--onoff">
+          <div class="cmd-label">ESTADO SIN CARGA</div>
+          <div class="noload-select" id="noLoadSelect">
+            <button type="button" class="noload-trigger state-on" id="noLoadTrigger" onclick="toggleNoLoadSelect()">
+              <span id="noLoadTriggerIcon">●</span>
+              <span id="noLoadTriggerText">-</span>
+              <span class="noload-arrow">▾</span>
+            </button>
+
+            <div class="noload-options" id="noLoadOptions">
+              <button id="noLoadKeep" class="cmd-send-btn active" onclick="sendNoLoadAction('KEEP')">ON</button>
+              <button id="noLoadOff" class="cmd-send-btn" onclick="sendNoLoadAction('OFF')">OFF</button>
+            </div>
+          </div>
+          <div class="cmd-hint" id="noLoadHint">Esperando conexión…</div>
         </div>
       </div>
 
