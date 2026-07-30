@@ -94,8 +94,8 @@ header h1 {
   font-family: var(--mono); font-size: 0.7rem;
   cursor: pointer;
   user-select: none;
-  padding: 5px 10px;
-  border: 1px solid var(--border2);
+  padding: 5px 7.5px;
+  border: 0.5px solid var(--border2);
   border-radius: var(--radius);
   transition: border-color 0.25s, background 0.25s;
 }
@@ -115,21 +115,20 @@ header h1 {
   outline-offset: 2px;
 }
 .status-dot {
-  width: 8px; height: 8px;
+  width: 7.5px; height: 7.5px;
   border-radius: 50%;
   background: var(--text-dim);
   transition: background 0.4s, box-shadow 0.4s;
 }
 .status-dot.connected {
   background: var(--accent-normal);
-  box-shadow: 0 0 10px var(--accent-normal);
+  box-shadow: 0 0 7.5px var(--accent-normal);
   animation: pulse 2s infinite;
 }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.5; }
 }
-
 
 
 .timestamp {
