@@ -1229,8 +1229,7 @@ main {
     margin-right: 14px;
   }
 
-  .power-card-inner    { flex-direction: column; }
-  .power-combined-grid { flex: none; }
+  .power-combined-grid { flex: 0 0 42%; }
 
   /* Potencia / Consumo */
   .chart-header:has(.chart-nav) {
