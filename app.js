@@ -523,7 +523,7 @@ function onMessageArrived(message) {
     if (btn && text && hint) {
       btn.className  = 'onoff-btn onoff-on';
       text.textContent = 'ON';
-      hint.textContent = 'Contacto energizado';
+      hint.textContent = 'Sistema energizado';
     }
   } else if (estadoFisico === 'OFF') {
     if (relayOn) {
@@ -537,7 +537,7 @@ function onMessageArrived(message) {
     if (btn && text && hint) {
       btn.className  = 'onoff-btn onoff-off';
       text.textContent = 'OFF';
-      hint.textContent = 'Contacto apagado';
+      hint.textContent = 'Sistema apagado';
     }
   }
 }

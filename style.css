@@ -1191,7 +1191,8 @@ main {
   .card--thd        { grid-column: 2 / 3; grid-row: 5; height: 275px; }
 
   .commands-body  { grid-template-columns: 1fr; }
-  .cmd-divider    { width: auto; height: 1px; }
+  .commands-body > .cmd-divider { width: auto; height: 1px; }
+  .cmd-group .cmd-divider { width: 1px; height: auto; align-self: stretch; }
   .cmd-block--onoff { flex: 1 1 auto; }
 }
 
