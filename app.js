@@ -644,7 +644,7 @@ function setStatus(isConnected) {
     text.textContent = 'Conectado';
   } else {
     dot.classList.remove('connected');
-    text.textContent = 'Desconectado';
+    text.textContent = 'Conectar';
   }
 }
 
