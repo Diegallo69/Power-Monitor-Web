@@ -184,8 +184,8 @@ function handleDataTimeout() {
 }
 
 function connect(isManual = false) {
-  const host  = '53064f1f1cf946df990d74434c676994.s1.eu.hivemq.cloud';
-  const port  = 8884;
+  const host  = 'c1c0322d.ala.us-east-1.emqxsl.com';
+  const port  = 8084;
   const topic = 'sec/datos';
 
   const clientId = 'sec_dashboard_' + Math.random().toString(16).slice(2, 8);
