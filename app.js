@@ -258,25 +258,10 @@ function onConnected(topic) {
   manualConnect = false;
   firstConnection = false;
 
-  client.subscribe('smartcontact/+/estado/conexion');
-
-  client.subscribe(topic);
-  client.subscribe('smartcontact/+/telemetria/estado');  
-
+  client.subscribe(topic);                         
+  client.subscribe('smartcontact/+/estado/#');     
+  client.subscribe('smartcontact/+/telemetria/#'); 
   client.subscribe('smartcontact/+/alertas');
-
-  client.subscribe('smartcontact/+/estado/rele');
-  client.subscribe('smartcontact/+/estado/no_load_action');
-
-  client.subscribe('smartcontact/+/estado/limite_potencia_max');
-  client.subscribe('smartcontact/+/estado/limite_potencia_min');
-
-  client.subscribe('smartcontact/+/estado/tiempo_muestreo');
-
-  client.subscribe('smartcontact/+/telemetria/armonicos');
-  client.subscribe('smartcontact/+/telemetria/waveform');
-
-
 
   setSystemOnline();
   updateEnergyCost();
